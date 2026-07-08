@@ -947,6 +947,14 @@ app.post('/api/seed', (req, res) => {
   res.json({ message: '种子帖子已创建', count: allPosts.length });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 文书APP后端服务运行在 http://localhost:${PORT}`);
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', time: Date.now() });
+});
+
+app.get('/', (req, res) => {
+  res.json({ message: '文书APP API is running', version: '1.0' });
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`🚀 文书APP后端服务运行在 port ${PORT}`);
 });
