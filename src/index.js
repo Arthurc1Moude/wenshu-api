@@ -6,7 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import {
-  getUsers, saveUsers,
+  getUsers, saveUsers, saveUser,
   getPosts, savePosts,
   getComments, saveComments,
   getActivities, saveActivities,
@@ -18,7 +18,9 @@ import {
   getLikes, saveLikes,
   getCollects, saveCollects,
   getFollows, saveFollows,
+  getBlacklists, saveBlacklist, deleteBlacklist,
   getRegisterCount, incrementRegisterCount,
+  saveVerificationCode, findValidVerificationCode, markVerificationCodeUsed, findUserByPhone,
   seedInitialData
 } from './db.js';
 
@@ -168,71 +170,309 @@ function createWelcomeConversation(userId) {
   saveMessages(messages);
 }
 
+async function isBlocked(userId1, userId2) {
+  if (!userId1 || !userId2) return false;
+  const blacklists = await getBlacklists();
+  return blacklists.some(b => 
+    (b.userId === userId1 && b.blockedUserId === userId2) ||
+    (b.userId === userId2 && b.blockedUserId === userId1)
+  );
+}
+
+function validatePassword(password) {
+  if (!password || password.length < 8) {
+    return { valid: false, message: '密码长度至少8位' };
+  }
+  if (!/[a-z]/.test(password)) {
+    return { valid: false, message: '密码需包含至少1个小写字母' };
+  }
+  if (!/[A-Z]/.test(password)) {
+    return { valid: false, message: '密码需包含至少1个大写字母' };
+  }
+  if (!/[0-9]/.test(password)) {
+    return { valid: false, message: '密码需包含至少1个数字' };
+  }
+  if (/[\u4e00-\u9fa5]/.test(password)) {
+    return { valid: false, message: '密码不能包含中文字符' };
+  }
+  return { valid: true };
+}
+
+function validatePhone(phone) {
+  return /^1[3-9]\d{9}$/.test(phone);
+}
+
+function generateVerificationCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function generateUsernameSuggestions(baseUsername, existingUsers, count = 5) {
+  const suggestions = [];
+  const existingNames = new Set(existingUsers.map(u => u.username.toLowerCase()));
+  
+  const suffixes = [
+    () => Math.floor(Math.random() * 100).toString(),
+    () => Math.floor(Math.random() * 1000).toString(),
+    () => ['_', '', '__'][Math.floor(Math.random() * 3)] + ['wenshu', 'shu', 'wen', 'reader', 'writer', 'life', 'note'][Math.floor(Math.random() * 7)],
+    () => ['2024', '2025', '666', '888', '999', '00', '01'][Math.floor(Math.random() * 7)],
+    () => ['_official', '_real', '_v', '__v2', '_home', '_zone'][Math.floor(Math.random() * 6)],
+  ];
+  
+  const prefixes = ['', 'the', 'real', 'im', 'mr', 'ms', ''];
+  
+  let attempts = 0;
+  while (suggestions.length < count && attempts < 50) {
+    attempts++;
+    let candidate;
+    if (suggestions.length < 2) {
+      const suffix = suffixes[suggestions.length]();
+      candidate = baseUsername + suffix;
+    } else {
+      const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+      const suffix = suffixes[Math.floor(Math.random() * suffixes.length)]();
+      candidate = prefix + baseUsername + suffix;
+    }
+    candidate = candidate.toLowerCase().replace(/[^a-z0-9_\u4e00-\u9fa5]/g, '');
+    if (candidate.length < 2) continue;
+    if (!existingNames.has(candidate) && !suggestions.includes(candidate)) {
+      suggestions.push(candidate);
+    }
+  }
+  
+  while (suggestions.length < count) {
+    const num = Math.floor(Math.random() * 10000);
+    const candidate = `${baseUsername}${num}`;
+    if (!existingNames.has(candidate) && !suggestions.includes(candidate)) {
+      suggestions.push(candidate);
+    }
+  }
+  
+  return suggestions.slice(0, count);
+}
+
 app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // ========== AUTH ==========
 app.post('/api/auth/register', (req, res) => {
-  const { username, password } = req.body;
-  if (!username || !password) return res.status(400).json({ error: '用户名和密码必填' });
-  const users = getUsers();
-  if (users.find(u => u.username === username)) return res.status(400).json({ error: '用户名已存在' });
+  try {
+    const { username, password, phone } = req.body;
+    if (!username || !password) return res.status(400).json({ error: '用户名和密码必填' });
+    if (username.length < 2) return res.status(400).json({ error: '用户名至少2个字符' });
+    
+    const pwdValidation = validatePassword(password);
+    if (!pwdValidation.valid) return res.status(400).json({ error: pwdValidation.message });
+    
+    if (phone && !validatePhone(phone)) return res.status(400).json({ error: '手机号格式不正确' });
+    
+    const users = getUsers();
+    if (users.find(u => u.username === username)) {
+      const suggestions = generateUsernameSuggestions(username, users);
+      return res.status(409).json({ 
+        error: '该用户名已被注册，建议直接登录或选择其他用户名', 
+        code: 'USERNAME_TAKEN',
+        suggestions 
+      });
+    }
+    if (phone && users.find(u => u.phone === phone)) {
+      return res.status(409).json({ 
+        error: '该手机号已注册账号，建议直接登录', 
+        code: 'PHONE_TAKEN' 
+      });
+    }
 
-  const rank = incrementRegisterCount();
-  let bonusCoins = 0;
-  if (rank <= 5) bonusCoins = 100000;
-  else if (rank <= 10) bonusCoins = 50000;
-  else if (rank <= 15) bonusCoins = 10000;
+    const rank = incrementRegisterCount();
+    let bonusCoins = 0;
+    if (rank <= 5) bonusCoins = 100000;
+    else if (rank <= 10) bonusCoins = 50000;
+    else if (rank <= 15) bonusCoins = 10000;
 
-  const avatarColors = ['000000', '333333', '555555', '1a1a1a', '2d2d2d'];
-  const color = avatarColors[Math.floor(Math.random() * avatarColors.length)];
-  const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=${color}&color=fff&size=200&bold=true`;
+    const avatarColors = ['000000', '333333', '555555', '1a1a1a', '2d2d2d'];
+    const color = avatarColors[Math.floor(Math.random() * avatarColors.length)];
+    const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=${color}&color=fff&size=200&bold=true`;
 
-  const user = {
-    id: genId('user'),
-    username,
-    password,
-    avatar,
-    cover: `https://picsum.photos/seed/cover${rank}/800/320`,
-    bio: '这个人很懒，什么都没写~',
-    wenshuCoin: bonusCoins,
-    isVip: false,
-    vipLevel: 0,
-    vipExp: 0,
-    vipExpiresAt: null,
-    followingCount: 0,
-    followersCount: 0,
-    likesCount: 0,
-    registerRank: rank,
-    isSignedInToday: false,
-    lastSignInDate: '',
-    consecutiveSignDays: 0,
-    createdAt: Date.now(),
-    joinedQQGroup: false
-  };
-  users.push(user);
-  saveUsers(users);
+    const user = {
+      id: genId('user'),
+      username,
+      password,
+      phone: phone || null,
+      avatar,
+      cover: `https://picsum.photos/seed/cover${rank}/800/320`,
+      bio: '这个人很懒，什么都没写~',
+      location: '',
+      wenshuCoin: bonusCoins,
+      isVip: false,
+      vipLevel: 0,
+      vipExp: 0,
+      vipExpiresAt: null,
+      followingCount: 0,
+      followersCount: 0,
+      likesCount: 0,
+      registerRank: rank,
+      isSignedInToday: false,
+      lastSignInDate: '',
+      consecutiveSignDays: 0,
+      createdAt: Date.now(),
+      joinedQQGroup: false
+    };
+    users.push(user);
+    saveUsers(users);
 
-  createWelcomeConversation(user.id);
+    createWelcomeConversation(user.id);
 
-  if (bonusCoins > 0) {
-    createNotification(user.id, 'system', `恭喜！作为第${rank}位注册用户，您获得了${bonusCoins}文书币奖励！`, null, null);
+    if (bonusCoins > 0) {
+      createNotification(user.id, 'system', `恭喜！作为第${rank}位注册用户，您获得了${bonusCoins}文书币奖励！`, null, null);
+    }
+    createNotification(user.id, 'system', '欢迎加入文书APP！记得每日签到领取文书币哦~', null, null);
+
+    res.json({ user: getUserPublic(user), token: user.id });
+  } catch (e) {
+    console.error('Register error:', e);
+    res.status(500).json({ error: '服务器错误' });
   }
-  createNotification(user.id, 'system', '欢迎加入文书APP！记得每日签到领取文书币哦~', null, null);
-
-  res.json({ user: getUserPublic(user), token: user.id });
 });
 
 app.post('/api/auth/login', (req, res) => {
-  const { username, password } = req.body;
-  const users = getUsers();
-  const user = users.find(u => u.username === username && u.password === password);
-  if (!user) return res.status(400).json({ error: '用户名或密码错误' });
+  try {
+    const { username, password } = req.body;
+    const users = getUsers();
+    let user = users.find(u => u.username === username && u.password === password);
+    if (!user && validatePhone(username)) {
+      user = users.find(u => u.phone === username && u.password === password);
+    }
+    if (!user) return res.status(400).json({ error: '用户名或密码错误' });
 
-  const today = getTodayStr();
-  user.isSignedInToday = (user.lastSignInDate === today);
-  saveUsers(users);
+    const today = getTodayStr();
+    user.isSignedInToday = (user.lastSignInDate === today);
+    saveUsers(users);
 
-  res.json({ user: getUserPublic(user), token: user.id });
+    res.json({ user: getUserPublic(user), token: user.id });
+  } catch (e) {
+    console.error('Login error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/auth/send-code', (req, res) => {
+  try {
+    const { phone, purpose } = req.body;
+    if (!phone || !validatePhone(phone)) {
+      return res.status(400).json({ error: '请输入正确的手机号' });
+    }
+    if (!purpose) {
+      return res.status(400).json({ error: '验证码用途不能为空' });
+    }
+    
+    const code = generateVerificationCode();
+    const vc = {
+      id: genId('vc'),
+      phone,
+      code,
+      purpose,
+      used: false,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+      createdAt: Date.now()
+    };
+    saveVerificationCode(vc);
+    
+    console.log(`📱 验证码发送到 ${phone}: ${code} (用途: ${purpose})`);
+    
+    res.json({ 
+      success: true, 
+      message: '验证码已发送', 
+      devCode: process.env.NODE_ENV === 'production' ? null : code 
+    });
+  } catch (e) {
+    console.error('Send code error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/users/me/bind-phone', (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const { phone, code } = req.body;
+    
+    if (!phone || !validatePhone(phone)) {
+      return res.status(400).json({ error: '请输入正确的手机号' });
+    }
+    if (!code || code.length !== 6) {
+      return res.status(400).json({ error: '请输入6位验证码' });
+    }
+    
+    const users = getUsers();
+    const me = users.find(u => u.id === userId);
+    if (!me) return res.status(401).json({ error: '用户不存在' });
+    
+    const existingUser = users.find(u => u.phone === phone && u.id !== userId);
+    if (existingUser) {
+      return res.status(409).json({ error: '该手机号已被其他账号绑定' });
+    }
+    
+    const vc = findValidVerificationCode(phone, code, 'bind_phone');
+    if (!vc) {
+      return res.status(400).json({ error: '验证码错误或已过期' });
+    }
+    
+    markVerificationCodeUsed(vc.id);
+    
+    me.phone = phone;
+    saveUsers(users);
+    
+    res.json({ success: true, message: '绑定成功' });
+  } catch (e) {
+    console.error('Bind phone error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/auth/change-password', (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const { oldPassword, newPassword, confirmPassword, phone, code } = req.body;
+    
+    const pwdValidation = validatePassword(newPassword);
+    if (!pwdValidation.valid) {
+      return res.status(400).json({ error: pwdValidation.message });
+    }
+    
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ error: '两次密码输入不一致' });
+    }
+    
+    const users = getUsers();
+    const me = users.find(u => u.id === userId);
+    if (!me) return res.status(401).json({ error: '用户不存在' });
+    
+    if (me.phone && phone && code) {
+      if (!validatePhone(phone)) {
+        return res.status(400).json({ error: '手机号格式不正确' });
+      }
+      if (me.phone !== phone) {
+        return res.status(400).json({ error: '请输入当前账号绑定的手机号' });
+      }
+      const vc = findValidVerificationCode(phone, code, 'change_password');
+      if (!vc) {
+        return res.status(400).json({ error: '验证码错误或已过期' });
+      }
+      markVerificationCodeUsed(vc.id);
+    } else if (oldPassword) {
+      if (me.password !== oldPassword) {
+        return res.status(400).json({ error: '原密码错误' });
+      }
+    } else {
+      return res.status(400).json({ error: '请提供手机验证码或原密码' });
+    }
+    
+    me.password = newPassword;
+    saveUsers(users);
+    
+    res.json({ success: true, message: '密码修改成功，请重新登录' });
+  } catch (e) {
+    console.error('Change password error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
 });
 
 app.get('/api/users/me', (req, res) => {
@@ -250,18 +490,29 @@ app.get('/api/users/me', (req, res) => {
 });
 
 app.put('/api/users/me', (req, res) => {
-  const userId = getUserId(req);
-  if (!userId) return res.status(401).json({ error: '未登录' });
-  const users = getUsers();
-  const idx = users.findIndex(u => u.id === userId);
-  if (idx === -1) return res.status(401).json({ error: '未登录' });
-  const { username, bio, avatar, cover } = req.body;
-  if (username) users[idx].username = username;
-  if (bio !== undefined) users[idx].bio = bio;
-  if (avatar) users[idx].avatar = avatar;
-  if (cover) users[idx].cover = cover;
-  saveUsers(users);
-  res.json(getUserPublic(users[idx]));
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const users = getUsers();
+    const idx = users.findIndex(u => u.id === userId);
+    if (idx === -1) return res.status(401).json({ error: '未登录' });
+    const { username, bio, avatar, cover, location } = req.body;
+    if (username) {
+      if (users.find(u => u.username === username && u.id !== userId)) {
+        return res.status(400).json({ error: '用户名已被使用' });
+      }
+      users[idx].username = username;
+    }
+    if (bio !== undefined) users[idx].bio = bio;
+    if (avatar) users[idx].avatar = avatar;
+    if (cover) users[idx].cover = cover;
+    if (location !== undefined) users[idx].location = location;
+    saveUsers(users);
+    res.json(getUserPublic(users[idx]));
+  } catch (e) {
+    console.error('Update user error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
 });
 
 app.get('/api/users/:id', (req, res) => {
@@ -887,9 +1138,11 @@ app.post('/api/seed', (req, res) => {
       id: genId('bot'),
       username: name,
       password: 'bot123456',
+      phone: null,
       avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=${color}&color=fff&size=200&bold=true`,
       cover: `https://picsum.photos/seed/bot${name}/800/320`,
       bio: '我是机器人，分享美好生活~',
+      location: '',
       wenshuCoin: 0,
       isVip: name === '文书小助手',
       vipLevel: name === '文书小助手' ? 10 : 0,
@@ -947,12 +1200,8 @@ app.post('/api/seed', (req, res) => {
   res.json({ message: '种子帖子已创建', count: allPosts.length });
 });
 
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', time: Date.now() });
-});
-
 app.get('/', (req, res) => {
-  res.json({ message: '文书APP API is running', version: '1.0' });
+  res.json({ message: '文书APP API is running', version: '1.1' });
 });
 
 app.listen(PORT, '0.0.0.0', () => {

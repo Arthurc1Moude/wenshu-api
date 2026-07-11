@@ -36,6 +36,13 @@ function writeJSON(filename, data) {
 
 export function getUsers() { return readJSON('users.json', []); }
 export function saveUsers(users) { writeJSON('users.json', users); }
+export function saveUser(user) {
+  const users = getUsers();
+  const idx = users.findIndex(u => u.id === user.id);
+  if (idx !== -1) users[idx] = user;
+  else users.push(user);
+  saveUsers(users);
+}
 
 export function getPosts() { return readJSON('posts.json', []); }
 export function savePosts(posts) { writeJSON('posts.json', posts); }
@@ -70,6 +77,17 @@ export function saveCollects(collects) { writeJSON('collects.json', collects); }
 export function getFollows() { return readJSON('follows.json', []); }
 export function saveFollows(follows) { writeJSON('follows.json', follows); }
 
+export function getBlacklists() { return readJSON('blacklists.json', []); }
+export function saveBlacklist(entry) {
+  const list = getBlacklists();
+  list.push(entry);
+  writeJSON('blacklists.json', list);
+}
+export function deleteBlacklist(userId, blockedUserId) {
+  const list = getBlacklists().filter(b => !(b.userId === userId && b.blockedUserId === blockedUserId));
+  writeJSON('blacklists.json', list);
+}
+
 export function getRegisterCount() {
   const meta = readJSON('meta.json', { registerCount: 0 });
   return meta.registerCount || 0;
@@ -78,6 +96,33 @@ export function incrementRegisterCount() {
   const count = getRegisterCount() + 1;
   writeJSON('meta.json', { registerCount: count });
   return count;
+}
+
+export function saveVerificationCode(vc) {
+  const codes = readJSON('verification_codes.json', []);
+  const filtered = codes.filter(c => !(c.phone === vc.phone && c.purpose === vc.purpose));
+  filtered.push(vc);
+  writeJSON('verification_codes.json', filtered);
+}
+
+export function findValidVerificationCode(phone, code, purpose) {
+  const codes = readJSON('verification_codes.json', []);
+  const now = Date.now();
+  return codes.find(c => c.phone === phone && c.code === code && c.purpose === purpose && !c.used && c.expiresAt > now);
+}
+
+export function markVerificationCodeUsed(id) {
+  const codes = readJSON('verification_codes.json', []);
+  const vc = codes.find(c => c.id === id);
+  if (vc) {
+    vc.used = true;
+    writeJSON('verification_codes.json', codes);
+  }
+}
+
+export function findUserByPhone(phone) {
+  const users = getUsers();
+  return users.find(u => u.phone === phone) || null;
 }
 
 export function seedInitialData() {
@@ -210,6 +255,7 @@ export function seedInitialData() {
         id: genId('bot'),
         username: name,
         password: 'bot123456',
+        phone: null,
         avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=${color}&color=fff&size=200&bold=true`,
         cover: `https://picsum.photos/seed/bot${i}/800/320`,
         bio: '我是机器人，分享美好生活~',
