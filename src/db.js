@@ -125,6 +125,9 @@ export function findUserByPhone(phone) {
   return users.find(u => u.phone === phone) || null;
 }
 
+export function getCommentLikes() { return readJSON('comment_likes.json', []); }
+export function saveCommentLikes(likes) { writeJSON('comment_likes.json', likes); }
+
 export function seedInitialData() {
   const activities = getActivities();
   if (activities.length === 0) {

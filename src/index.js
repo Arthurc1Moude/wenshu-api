@@ -21,6 +21,7 @@ import {
   getBlacklists, saveBlacklist, deleteBlacklist,
   getRegisterCount, incrementRegisterCount,
   saveVerificationCode, findValidVerificationCode, markVerificationCodeUsed, findUserByPhone,
+  getCommentLikes, saveCommentLikes,
   seedInitialData
 } from './db.js';
 
@@ -811,19 +812,29 @@ app.post('/api/posts/:id/collect', (req, res) => {
 
 // ========== COMMENTS ==========
 app.get('/api/posts/:id/comments', (req, res) => {
-  const comments = getComments();
-  const users = getUsers();
-  const postComments = comments.filter(c => c.postId === req.params.id).sort((a, b) => a.createdAt - b.createdAt);
-  const result = postComments.map(c => {
-    const author = users.find(u => u.id === c.authorId);
-    const replyToUser = c.replyToId ? users.find(u => u.id === c.replyToId) : null;
-    return {
-      ...c,
-      author: author ? getUserPublic(author) : null,
-      replyToUser: replyToUser ? { id: replyToUser.id, username: replyToUser.username } : null
-    };
-  });
-  res.json(result);
+  try {
+    const currentUserId = getUserId(req);
+    const comments = getComments();
+    const users = getUsers();
+    const commentLikes = getCommentLikes();
+    const postComments = comments.filter(c => c.postId === req.params.id).sort((a, b) => a.createdAt - b.createdAt);
+    const result = postComments.map(c => {
+      const author = users.find(u => u.id === c.authorId);
+      const replyToUser = c.replyToId ? users.find(u => u.id === c.replyToId) : null;
+      const isLiked = currentUserId ? commentLikes.some(l => l.commentId === c.id && l.userId === currentUserId) : false;
+      return {
+        ...c,
+        likeCount: c.likeCount || 0,
+        isLiked,
+        author: author ? getUserPublic(author) : null,
+        replyToUser: replyToUser ? { id: replyToUser.id, username: replyToUser.username } : null
+      };
+    });
+    res.json(result);
+  } catch (e) {
+    console.error('Get comments error:', e);
+    res.status(500).json({ error: '获取评论失败' });
+  }
 });
 
 app.post('/api/posts/:id/comments', (req, res) => {
@@ -870,6 +881,36 @@ app.post('/api/posts/:id/comments', (req, res) => {
     author: getUserPublic(user),
     replyToUser: replyToUser ? { id: replyToUser.id, username: replyToUser.username } : null,
   });
+});
+
+app.post('/api/comments/:id/like', (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const comments = getComments();
+    const commentLikes = getCommentLikes();
+    const idx = comments.findIndex(c => c.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: '评论不存在' });
+    const comment = comments[idx];
+    const existingIdx = commentLikes.findIndex(l => l.commentId === comment.id && l.userId === userId);
+    
+    let isLiked = false;
+    if (existingIdx !== -1) {
+      commentLikes.splice(existingIdx, 1);
+      comment.likeCount = Math.max(0, (comment.likeCount || 0) - 1);
+    } else {
+      commentLikes.push({ id: genId('clike'), commentId: comment.id, userId, createdAt: Date.now() });
+      comment.likeCount = (comment.likeCount || 0) + 1;
+      isLiked = true;
+    }
+    
+    saveComments(comments);
+    saveCommentLikes(commentLikes);
+    res.json({ likeCount: comment.likeCount, isLiked });
+  } catch (e) {
+    console.error('Comment like error:', e);
+    res.status(500).json({ error: '操作失败' });
+  }
 });
 
 // ========== ACTIVITIES ==========
