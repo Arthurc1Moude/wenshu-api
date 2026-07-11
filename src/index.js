@@ -516,10 +516,27 @@ app.put('/api/users/me', (req, res) => {
 });
 
 app.get('/api/users/:id', (req, res) => {
-  const users = getUsers();
-  const user = users.find(u => u.id === req.params.id);
-  if (!user) return res.status(404).json({ error: '用户不存在' });
-  res.json(getUserPublic(user));
+  try {
+    const users = getUsers();
+    const user = users.find(u => u.id === req.params.id);
+    if (!user) return res.status(404).json({ error: '用户不存在' });
+    const currentUserId = getUserId(req);
+    const follows = getFollows();
+    let isFollowing = false;
+    let isMutual = false;
+    if (currentUserId && currentUserId !== user.id) {
+      isFollowing = follows.some(f => f.followerId === currentUserId && f.followingId === user.id);
+      const isFollowedBy = follows.some(f => f.followerId === user.id && f.followingId === currentUserId);
+      isMutual = isFollowing && isFollowedBy;
+    }
+    const userPublic = getUserPublic(user);
+    userPublic.isFollowing = isFollowing;
+    userPublic.isMutual = isMutual;
+    res.json(userPublic);
+  } catch (e) {
+    console.error('Get user error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
 });
 
 // ========== SIGN IN ==========
@@ -1102,17 +1119,54 @@ app.get('/api/users/:id/follow-status', (req, res) => {
 
 // ========== SEARCH ==========
 app.get('/api/search', (req, res) => {
-  const { q } = req.query;
-  const currentUserId = getUserId(req);
-  if (!q) return res.json({ posts: [], users: [] });
-  const posts = getPosts();
-  const users = getUsers();
-  const likes = getLikes();
-  const collects = getCollects();
-  const matchedPosts = posts.filter(p => p.content.includes(q) || p.tags.some(t => t.includes(q))).slice(0, 30);
-  const matchedUsers = users.filter(u => u.username.includes(q)).slice(0, 20).map(u => getUserPublic(u));
-  const postsWithAuthor = matchedPosts.map(p => decoratePost(p, currentUserId, users, likes, collects));
-  res.json({ posts: postsWithAuthor, users: matchedUsers });
+  try {
+    const { q } = req.query;
+    const currentUserId = getUserId(req);
+    if (!q || !q.trim()) return res.json({ posts: [], users: [] });
+    
+    const query = q.trim();
+    const queryLower = query.toLowerCase();
+    const keywords = queryLower.split(/\s+/).filter(k => k.length > 0);
+    
+    const posts = getPosts();
+    const users = getUsers();
+    const comments = getComments();
+    const likes = getLikes();
+    const collects = getCollects();
+    
+    function textMatches(text) {
+      if (!text) return false;
+      const textLower = text.toLowerCase();
+      if (keywords.length === 0) return textLower.includes(queryLower);
+      return keywords.every(kw => textLower.includes(kw));
+    }
+    
+    const postIdsWithComments = new Set();
+    comments.forEach(c => {
+      if (textMatches(c.content)) {
+        postIdsWithComments.add(c.postId);
+      }
+    });
+    
+    const matchedPosts = posts.filter(p => {
+      if (textMatches(p.content)) return true;
+      if (p.tags && p.tags.some(t => textMatches(t) || textMatches('#' + t))) return true;
+      if (postIdsWithComments.has(p.id)) return true;
+      return false;
+    }).slice(0, 50);
+    
+    const matchedUsers = users.filter(u => {
+      if (textMatches(u.username)) return true;
+      if (textMatches(u.bio)) return true;
+      return false;
+    }).slice(0, 30).map(u => getUserPublic(u));
+    
+    const postsWithAuthor = matchedPosts.map(p => decoratePost(p, currentUserId, users, likes, collects));
+    res.json({ posts: postsWithAuthor, users: matchedUsers });
+  } catch (e) {
+    console.error('Search error:', e);
+    res.status(500).json({ error: '搜索失败', posts: [], users: [] });
+  }
 });
 
 // ========== UPLOAD ==========
