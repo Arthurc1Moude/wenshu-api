@@ -287,6 +287,41 @@ export async function initTables() {
 
     await client.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS coin_count INTEGER DEFAULT 0`);
     await client.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS tipped_by JSONB DEFAULT '[]'::jsonb`);
+    await client.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS title TEXT DEFAULT ''`);
+
+    const userAlterColumns = [
+      'phone TEXT UNIQUE',
+      'avatar TEXT',
+      'cover TEXT',
+      'bio TEXT DEFAULT \'\'',
+      'location TEXT DEFAULT \'\'',
+      'wenshu_coin INTEGER DEFAULT 0',
+      'is_vip BOOLEAN DEFAULT false',
+      'vip_level INTEGER DEFAULT 0',
+      'vip_exp INTEGER DEFAULT 0',
+      'vip_expires_at BIGINT',
+      'following_count INTEGER DEFAULT 0',
+      'followers_count INTEGER DEFAULT 0',
+      'likes_count INTEGER DEFAULT 0',
+      'register_rank INTEGER DEFAULT 0',
+      'is_signed_in_today BOOLEAN DEFAULT false',
+      'last_sign_in_date TEXT DEFAULT \'\'',
+      'consecutive_sign_days INTEGER DEFAULT 0',
+      'created_at BIGINT',
+      'joined_qq_group BOOLEAN DEFAULT false',
+      'is_admin BOOLEAN DEFAULT false',
+      'is_banned BOOLEAN DEFAULT false',
+      'ban_until BIGINT',
+      'ban_reason TEXT'
+    ];
+    for (const col of userAlterColumns) {
+      const colName = col.split(' ')[0];
+      try {
+        await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS ${col}`);
+      } catch (e) {
+        console.warn(`Column ${colName} may already exist:`, e.message);
+      }
+    }
 
     console.log('✅ PostgreSQL tables initialized');
   } finally {
