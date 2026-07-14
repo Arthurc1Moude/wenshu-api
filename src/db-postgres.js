@@ -375,7 +375,7 @@ function rowToPost(row) {
     collectCount: row.collect_count || 0,
     coinCount: row.coin_count || 0,
     tippedBy: row.tipped_by || [],
-    createdAt: row.created_at,
+    createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
 }
 
@@ -388,23 +388,23 @@ function rowToComment(row) {
     content: row.content,
     likeCount: row.like_count || 0,
     replyToId: row.reply_to_id,
-    createdAt: row.created_at,
+    createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
 }
 
 function rowToLike(row) {
   if (!row) return null;
-  return { id: row.id, postId: row.post_id, userId: row.user_id, createdAt: row.created_at };
+  return { id: row.id, postId: row.post_id, userId: row.user_id, createdAt: Math.floor(Number(row.created_at) || Date.now()) };
 }
 
 function rowToCollect(row) {
   if (!row) return null;
-  return { id: row.id, postId: row.post_id, userId: row.user_id, createdAt: row.created_at };
+  return { id: row.id, postId: row.post_id, userId: row.user_id, createdAt: Math.floor(Number(row.created_at) || Date.now()) };
 }
 
 function rowToFollow(row) {
   if (!row) return null;
-  return { id: row.id, followerId: row.follower_id, followingId: row.following_id, createdAt: row.created_at };
+  return { id: row.id, followerId: row.follower_id, followingId: row.following_id, createdAt: Math.floor(Number(row.created_at) || Date.now()) };
 }
 
 function rowToNotification(row) {
@@ -417,7 +417,7 @@ function rowToNotification(row) {
     fromUserId: row.from_user_id,
     postId: row.post_id,
     isRead: row.is_read,
-    createdAt: row.created_at,
+    createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
 }
 
@@ -430,7 +430,7 @@ function rowToConversation(row) {
     avatar: row.avatar,
     participantIds: row.participant_ids || [],
     lastMessage: row.last_message,
-    lastMessageTime: row.last_message_time,
+    lastMessageTime: row.last_message_time ? Math.floor(Number(row.last_message_time)) : null,
     unreadCount: row.unread_count,
     isSystem: row.is_system,
   };
@@ -444,7 +444,7 @@ function rowToMessage(row) {
     senderId: row.sender_id,
     content: row.content,
     read: row.read,
-    createdAt: row.created_at,
+    createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
 }
 
