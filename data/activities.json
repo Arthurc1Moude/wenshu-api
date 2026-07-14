@@ -1,0 +1,74 @@
+[
+  {
+    "id": "act_1",
+    "title": "夏日生活记录",
+    "cover": "https://picsum.photos/seed/act1/800/450",
+    "description": "分享你的夏日生活瞬间，带话题#夏日生活 发布帖子即可参与！",
+    "hashtag": "夏日生活",
+    "rewardCoins": 500,
+    "participantCount": 1234,
+    "participants": [],
+    "status": "active",
+    "startDate": 1783487515021,
+    "endDate": 1784351515021,
+    "rules": [
+      "带话题#夏日生活 发布原创帖子",
+      "内容需与夏日生活相关",
+      "活动结束后评选10名优质内容，每人获得500文书币"
+    ]
+  },
+  {
+    "id": "act_2",
+    "title": "日常打卡挑战",
+    "cover": "https://picsum.photos/seed/act2/800/450",
+    "description": "连续7天发布日常帖子，坚持打卡赢取文书币奖励！",
+    "hashtag": "日常打卡",
+    "rewardCoins": 200,
+    "participantCount": 5678,
+    "participants": [],
+    "status": "active",
+    "startDate": 1783660315021,
+    "endDate": 1784956315021,
+    "rules": [
+      "带话题#日常打卡 连续7天发帖",
+      "每天至少发布1篇帖子",
+      "完成打卡即可获得200文书币"
+    ]
+  },
+  {
+    "id": "act_3",
+    "title": "读书分享月",
+    "cover": "https://picsum.photos/seed/act3/800/450",
+    "description": "分享你最近在读的好书，带话题#读书分享 参与活动。",
+    "hashtag": "读书分享",
+    "rewardCoins": 300,
+    "participantCount": 892,
+    "participants": [],
+    "status": "upcoming",
+    "startDate": 1783919515021,
+    "endDate": 1786338715021,
+    "rules": [
+      "带话题#读书分享 发布读书笔记",
+      "包含书籍封面照片更佳",
+      "优质分享将获得300文书币奖励"
+    ]
+  },
+  {
+    "id": "act_4",
+    "title": "春季摄影大赛",
+    "cover": "https://picsum.photos/seed/act4/800/450",
+    "description": "记录春天的美好瞬间，摄影作品征集活动已圆满结束。",
+    "hashtag": "春季摄影",
+    "rewardCoins": 800,
+    "participantCount": 3421,
+    "participants": [],
+    "status": "ended",
+    "startDate": 1781154715021,
+    "endDate": 1783314715021,
+    "rules": [
+      "带话题#春季摄影 发布摄影作品",
+      "作品需为原创",
+      "已评选出获奖名单"
+    ]
+  }
+]

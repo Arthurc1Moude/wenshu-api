@@ -1,0 +1,90 @@
+[
+  {
+    "code": "WENSHU2024",
+    "coinValue": 200,
+    "rewardType": "coin",
+    "description": "新用户欢迎礼包",
+    "validUntil": 1815282715022,
+    "usedBy": []
+  },
+  {
+    "code": "QQGROUP702",
+    "coinValue": 300,
+    "rewardType": "coin",
+    "description": "加入QQ群专属奖励",
+    "validUntil": 1815282715022,
+    "usedBy": []
+  },
+  {
+    "code": "DAILYSIGN",
+    "coinValue": 50,
+    "rewardType": "coin",
+    "description": "每日签到额外奖励",
+    "validUntil": 1786338715022,
+    "usedBy": []
+  },
+  {
+    "code": "VIPWELCOME",
+    "coinValue": 500,
+    "rewardType": "coin",
+    "description": "开通文书会奖励",
+    "validUntil": 1815282715022,
+    "usedBy": []
+  },
+  {
+    "code": "SUMMER2024",
+    "coinValue": 100,
+    "rewardType": "coin",
+    "description": "夏日活动兑换码",
+    "validUntil": 1788930715022,
+    "usedBy": []
+  },
+  {
+    "code": "WELCOME100",
+    "coinValue": 100,
+    "rewardType": "coin",
+    "description": "欢迎使用文书APP",
+    "validUntil": 1815282715022,
+    "usedBy": []
+  },
+  {
+    "code": "A3k320",
+    "coinValue": 2000,
+    "rewardType": "coin",
+    "description": "限时兑换码-2000文书币",
+    "validUntil": 1791522715022,
+    "usedBy": []
+  },
+  {
+    "code": "56gh70",
+    "coinValue": 1000,
+    "rewardType": "coin",
+    "description": "限时兑换码-1000文书币",
+    "validUntil": 1791522715022,
+    "usedBy": []
+  },
+  {
+    "code": "Kp9m2X",
+    "coinValue": 0,
+    "rewardType": "vip",
+    "description": "免费开通文书会VIP",
+    "validUntil": 1791522715022,
+    "usedBy": []
+  },
+  {
+    "code": "Qr4n7V",
+    "coinValue": 0,
+    "rewardType": "vip",
+    "description": "免费开通文书会VIP",
+    "validUntil": 1791522715022,
+    "usedBy": []
+  },
+  {
+    "code": "Zt8w3Y",
+    "coinValue": 0,
+    "rewardType": "vip",
+    "description": "免费开通文书会VIP",
+    "validUntil": 1791522715022,
+    "usedBy": []
+  }
+]
