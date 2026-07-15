@@ -19,7 +19,11 @@ import {
   pgGetCommentLikes, pgAddCommentLike, pgDeleteCommentLike, pgGetCommentLikeCount, pgIsCommentLikedByUser,
   pgGetGroupChats, pgGetGroupChatById, pgGetGroupChatByNumber, pgSaveGroupChat,
   pgGetGroupMembers, pgGetUserGroups, pgAddGroupMember, pgRemoveGroupMember, pgIsGroupMember, pgGenerateGroupNumber,
-  pgSaveFileMeta, pgGetFileMeta, pgGetAllFileMeta, pgGetExpiredFileMeta, pgDeleteFileMeta, pgGetUserTotalStorage, pgGetTotalStorage
+  pgSaveFile, pgGetFileById, pgGetFilesByPost, pgGetFilesByUploader, pgDeleteFile,
+  pgIncrementFileDownload, pgGetExpiredFiles, pgGetUserTotalStorage,
+  pgSaveUrlPreview, pgGetUrlPreview,
+  pgSaveReport,
+  pgGetTips, pgAddTip
 } from './db-postgres.js';
 
 let memUsers = [];
@@ -41,7 +45,9 @@ let memGroupMembers = [];
 let memRegisterCount = 0;
 let memVerifCodes = [];
 let memTips = [];
-let memFileMetadata = new Map();
+let memFiles = [];
+let memUrlPreviews = [];
+let memReports = [];
 let useMem = false;
 
 function uid(prefix) { return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
@@ -302,10 +308,69 @@ export async function generateGroupNumber() {
   return pgGenerateGroupNumber();
 }
 
-export function getTips() { return useMem ? [...memTips] : []; }
-export function addTip(tip) {
+export async function getTips() { return useMem ? [...memTips] : pgGetTips(); }
+export async function addTip(tip) {
   if (useMem) { memTips.push(tip); return tip; }
-  return tip;
+  return pgAddTip(tip);
+}
+
+export async function saveFile(file) {
+  if (useMem) {
+    const i = memFiles.findIndex(f => f.id === file.id);
+    if (i >= 0) memFiles[i] = { ...memFiles[i], ...file }; else memFiles.push(file);
+    return file;
+  }
+  return pgSaveFile(file);
+}
+export async function getFileById(id) {
+  if (useMem) return memFiles.find(f => f.id === id) || null;
+  return pgGetFileById(id);
+}
+export async function getFilesByPost(postId) {
+  if (useMem) return memFiles.filter(f => f.postId === postId);
+  return pgGetFilesByPost(postId);
+}
+export async function getFilesByUploader(uploaderId) {
+  if (useMem) return memFiles.filter(f => f.uploaderId === uploaderId);
+  return pgGetFilesByUploader(uploaderId);
+}
+export async function deleteFile(id) {
+  if (useMem) { memFiles = memFiles.filter(f => f.id !== id); return; }
+  return pgDeleteFile(id);
+}
+export async function incrementFileDownload(id) {
+  if (useMem) {
+    const f = memFiles.find(f => f.id === id);
+    if (f) f.downloadCount = (f.downloadCount || 0) + 1;
+    return;
+  }
+  return pgIncrementFileDownload(id);
+}
+export async function getExpiredFiles() {
+  if (useMem) { const now = Date.now(); return memFiles.filter(f => f.expiresAt && f.expiresAt < now && !f.isPermanent); }
+  return pgGetExpiredFiles();
+}
+export async function getUserTotalStorage(uploaderId) {
+  if (useMem) return memFiles.filter(f => f.uploaderId === uploaderId).reduce((s, f) => s + (f.size || 0), 0);
+  return pgGetUserTotalStorage(uploaderId);
+}
+
+export async function saveUrlPreview(preview) {
+  if (useMem) {
+    const i = memUrlPreviews.findIndex(p => p.url === preview.url);
+    if (i >= 0) memUrlPreviews[i] = { ...preview }; else memUrlPreviews.push(preview);
+    return preview;
+  }
+  return pgSaveUrlPreview(preview);
+}
+export async function getUrlPreview(url) {
+  if (useMem) return memUrlPreviews.find(p => p.url === url) || null;
+  return pgGetUrlPreview(url);
+}
+
+export async function saveReport(report) {
+  if (useMem) { memReports.push(report); return report; }
+  return pgSaveReport(report);
 }
 
 export async function seedInitialData() {
@@ -347,62 +412,3 @@ export async function seedInitialData() {
 
 export const usePostgres = true;
 export { pool };
-
-export async function saveFileMeta(meta) {
-  if (useMem) {
-    memFileMetadata.set(meta.id, { ...meta });
-    return meta;
-  }
-  return pgSaveFileMeta(meta);
-}
-
-export async function getFileMeta(id) {
-  if (useMem) {
-    return memFileMetadata.get(id) || null;
-  }
-  return pgGetFileMeta(id);
-}
-
-export async function getAllFileMeta() {
-  if (useMem) {
-    return Array.from(memFileMetadata.values());
-  }
-  return pgGetAllFileMeta();
-}
-
-export async function getExpiredFileMeta(now) {
-  if (useMem) {
-    return Array.from(memFileMetadata.values()).filter(m => m.expiresAt && m.expiresAt < now);
-  }
-  return pgGetExpiredFileMeta(now);
-}
-
-export async function deleteFileMeta(id) {
-  if (useMem) {
-    memFileMetadata.delete(id);
-    return;
-  }
-  return pgDeleteFileMeta(id);
-}
-
-export async function getUserTotalStorage(userId) {
-  if (useMem) {
-    let total = 0;
-    for (const m of memFileMetadata.values()) {
-      if (m.uploaderId === userId) total += m.size;
-    }
-    return total;
-  }
-  return pgGetUserTotalStorage(userId);
-}
-
-export async function getTotalStorage() {
-  if (useMem) {
-    let total = 0;
-    for (const m of memFileMetadata.values()) {
-      total += m.size;
-    }
-    return total;
-  }
-  return pgGetTotalStorage();
-}

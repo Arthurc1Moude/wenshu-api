@@ -27,8 +27,7 @@ import {
   getCommentLikes, addCommentLike, removeCommentLike, isCommentLikedByUser, getCommentLikeCount,
   getGroupChats, getGroupChatById, getGroupChatByNumber, saveGroupChat,
   getGroupMembers, getUserGroups, addGroupMember, removeGroupMember, isGroupMember, generateGroupNumber,
-  getTips, addTip,
-  saveFileMeta, getFileMeta, getAllFileMeta, getExpiredFileMeta, deleteFileMeta, getTotalStorage
+  getTips, addTip
 } from './db.js';
 
 import {
@@ -39,7 +38,16 @@ import {
   getGames, saveGame
 } from './features-store.js';
 
-import { isR2Enabled, getPublicUrl, saveFile as storageSaveFile, deleteFile as storageDeleteFile, fileExists as storageFileExists, getFileStream, getSignedDownloadUrl, getLocalUploadDir } from './storage.js';
+import { uploadFile, deleteFile as deleteStorageFile, getFileUrl, getFileStream, initStorage } from './file-storage.js';
+import { sendSmsCode, generateCode } from './sms.js';
+import { fetchUrlPreview } from './url-preview.js';
+import {
+  saveFile as dbSaveFile, getFileById as dbGetFileById, getFilesByPost as dbGetFilesByPost,
+  getFilesByUploader, deleteFile as dbDeleteFile, incrementFileDownload,
+  getExpiredFiles, getUserTotalStorage,
+  saveUrlPreview as dbSaveUrlPreview, getUrlPreview as dbGetUrlPreview,
+  saveReport as dbSaveReport
+} from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -52,156 +60,26 @@ app.use(cors({
   origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(','),
   credentials: true
 }));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '200mb' }));
 
-const uploadsDir = getLocalUploadDir();
+const uploadsDir = path.join(__dirname, '..', 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
-if (!isR2Enabled()) {
-  app.use('/uploads', express.static(uploadsDir));
-} else {
-  console.log('Cloudflare R2 storage enabled');
-}
+app.use('/uploads', express.static(uploadsDir));
 
-const MAX_SERVER_STORAGE = 50 * 1024 * 1024 * 1024;
+const MEM_STORAGE_LIMIT = 200 * 1024 * 1024;
+const memoryStorage = multer.memoryStorage();
+const uploadMemory = multer({ storage: memoryStorage, limits: { fileSize: MEM_STORAGE_LIMIT } });
 
-function checkDiskSpace() {
-  try {
-    const stats = fs.statfsSync(uploadsDir);
-    const availableBytes = stats.bavail * stats.bsize;
-    return availableBytes;
-  } catch (e) {
-    try {
-      const totalUsed = getTotalUsedSpace();
-      if (totalUsed > MAX_SERVER_STORAGE * 0.95) return 0;
-      return MAX_SERVER_STORAGE - totalUsed;
-    } catch (e2) {
-      return 1024 * 1024 * 1024;
-    }
-  }
-}
-
-function getTotalUsedSpace() {
-  let total = 0;
-  try {
-    const files = fs.readdirSync(uploadsDir);
-    for (const f of files) {
-      try {
-        const fp = path.join(uploadsDir, f);
-        const stat = fs.statSync(fp);
-        total += stat.size;
-      } catch (e) {}
-    }
-  } catch (e) {}
-  return total;
-}
-
-function getFileExtension(filename) {
-  const ext = path.extname(filename).toLowerCase().replace('.', '');
-  return ext || 'unknown';
-}
-
-function getFileIconByExt(ext) {
-  const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'heic', 'heif'];
-  const videoExts = ['mp4', 'avi', 'mov', 'wmv', 'flv', 'mkv', 'webm', '3gp'];
-  const audioExts = ['mp3', 'wav', 'flac', 'aac', 'ogg', 'wma', 'm4a'];
-  const docExts = ['doc', 'docx', 'pdf', 'txt', 'rtf', 'odt'];
-  const xlsExts = ['xls', 'xlsx', 'csv', 'ods'];
-  const pptExts = ['ppt', 'pptx', 'odp'];
-  const zipExts = ['zip', 'rar', '7z', 'tar', 'gz', 'bz2'];
-  const codeExts = ['js', 'ts', 'py', 'java', 'cpp', 'c', 'html', 'css', 'json', 'xml', 'kt', 'swift'];
-  if (imageExts.includes(ext)) return 'image';
-  if (videoExts.includes(ext)) return 'video';
-  if (audioExts.includes(ext)) return 'audio';
-  if (docExts.includes(ext)) return 'document';
-  if (xlsExts.includes(ext)) return 'spreadsheet';
-  if (pptExts.includes(ext)) return 'presentation';
-  if (zipExts.includes(ext)) return 'archive';
-  if (codeExts.includes(ext)) return 'code';
-  return 'unknown';
-}
-
-function formatFileSize(bytes) {
-  if (bytes < 1024) return bytes + ' B';
-  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
-}
-
-async function getUserUploadLimit(userId) {
-  if (!userId) return { limit: 1024 * 1024 * 1024, isPermanent: false, label: '普通用户' };
-  const users = await getUsers();
-  const user = users.find(u => u.id === userId);
-  if (!user) return { limit: 1024 * 1024 * 1024, isPermanent: false, label: '普通用户' };
-  if (user.isAdmin) return { limit: Infinity, isPermanent: true, label: '管理员' };
-  const now = Date.now();
-  if (user.vipLevel >= 2 && user.vipExpiresAt && user.vipExpiresAt > now) {
-    return { limit: 20 * 1024 * 1024 * 1024, isPermanent: true, label: '文书会年卡' };
-  }
-  if (user.vipLevel >= 1 && user.vipExpiresAt && user.vipExpiresAt > now) {
-    return { limit: 16 * 1024 * 1024 * 1024, isPermanent: false, label: '文书会月卡' };
-  }
-  return { limit: 1024 * 1024 * 1024, isPermanent: false, label: '普通用户' };
-}
-
-function getUploadLimitMessage(bytes, limitInfo) {
-  const GB = 1024 * 1024 * 1024;
-  if (bytes > limitInfo.limit) {
-    if (limitInfo.limit === 1 * GB) return '仅会员可上传超出1GB的文件';
-    if (limitInfo.limit === 16 * GB) return '需升级到会员年卡获得最高20GB上传上限';
-    if (limitInfo.limit === 20 * GB) return '仅管理员可上传>20GB的文件';
-    return '超出上传限制';
-  }
-  return null;
-}
-
-async function cleanupExpiredFiles() {
-  try {
-    const now = Date.now();
-    let expired = [];
-    try {
-      expired = await getExpiredFileMeta(now);
-    } catch (dbErr) {
-      return;
-    }
-    for (const meta of expired) {
-      try { await storageDeleteFile(meta.filename); } catch(e) { console.error('Failed to delete expired file from storage:', e.message); }
-      try { await deleteFileMeta(meta.id); } catch(e) {}
-    }
-    if (expired.length > 0) {
-      console.log(`Cleaned up ${expired.length} expired files`);
-    }
-  } catch (e) {
-    console.error('Error cleaning up expired files:', e.message);
-  }
-}
-
-setInterval(cleanupExpiredFiles, 60 * 60 * 1000);
-
-const fileStorage = multer.diskStorage({
+const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadsDir),
   filename: (req, file, cb) => {
     const ext = path.extname(file.originalname);
-    const uniqueName = `${uuidv4()}${ext}`;
-    cb(null, uniqueName);
+    cb(null, `${uuidv4()}${ext}`);
   }
 });
-
-const imageUpload = multer({
-  storage: fileStorage,
-  limits: { fileSize: 500 * 1024 * 1024 }
-});
-
-const mediaUpload = multer({
-  storage: fileStorage,
-  limits: { fileSize: 25 * 1024 * 1024 * 1024 }
-});
-
-const fileUpload = multer({
-  storage: fileStorage,
-  limits: { fileSize: 25 * 1024 * 1024 * 1024 }
-});
+const upload = multer({ storage, limits: { fileSize: 20 * 1024 * 1024 } });
 
 function getTodayStr() {
   const d = new Date();
@@ -831,14 +709,14 @@ app.get('/api/posts', async (req, res) => {
     const likes = await getLikes();
     const collects = await getCollects();
     const blacklists = await getBlacklists();
-    const tipsList = getTips();
+    const tipsList = await getTips();
 
     if (currentUserId) {
       const blockedUserIds = blacklists.filter(b => b.userId === currentUserId).map(b => b.blockedUserId);
       posts = posts.filter(p => !blockedUserIds.includes(p.authorId));
     }
 
-    if (tag) posts = posts.filter(p => p.tags.some(t => t.includes(tag)));
+    if (tag) posts = posts.filter(p => (p.tags || []).some(t => t.includes(tag)));
     if (userId) posts = posts.filter(p => p.authorId === userId);
 
     if (sort === 'hot') {
@@ -847,7 +725,25 @@ app.get('/api/posts', async (req, res) => {
       posts = [...posts].sort((a, b) => b.createdAt - a.createdAt);
     }
 
-    res.json(posts.map(p => decoratePost(p, currentUserId, users, likes, collects, tipsList)));
+    const result = [];
+    for (const p of posts) {
+      let fileDetails = [];
+      if (p.files && p.files.length > 0) {
+        for (const fref of p.files) {
+          if (typeof fref === 'string') {
+            const f = await dbGetFileById(fref);
+            if (f) fileDetails.push({ id: f.id, filename: f.originalName, size: f.size, mimeType: f.mimeType, url: getFileUrl(f.storedKey, f.storageType), expiresAt: f.expiresAt, isPermanent: f.isPermanent });
+          } else if (fref.id) {
+            fileDetails.push(fref);
+          }
+        }
+      }
+      const decorated = decoratePost(p, currentUserId, users, likes, collects, tipsList);
+      decorated.files = fileDetails;
+      result.push(decorated);
+    }
+
+    res.json(result);
   } catch (e) {
     console.error('Get posts error:', e);
     res.status(500).json({ error: '服务器错误' });
@@ -861,10 +757,24 @@ app.get('/api/posts/:id', async (req, res) => {
     const users = await getUsers();
     const likes = await getLikes();
     const collects = await getCollects();
-    const tipsList = getTips();
+    const tipsList = await getTips();
     const post = posts.find(p => p.id === req.params.id);
     if (!post) return res.status(404).json({ error: '帖子不存在' });
-    res.json(decoratePost(post, currentUserId, users, likes, collects, tipsList));
+
+    let fileDetails = [];
+    if (post.files && post.files.length > 0) {
+      for (const fref of post.files) {
+        if (typeof fref === 'string') {
+          const f = await dbGetFileById(fref);
+          if (f) fileDetails.push({ id: f.id, filename: f.originalName, size: f.size, mimeType: f.mimeType, url: getFileUrl(f.storedKey, f.storageType), expiresAt: f.expiresAt, isPermanent: f.isPermanent });
+        } else if (fref.id) {
+          fileDetails.push(fref);
+        }
+      }
+    }
+    const decorated = decoratePost(post, currentUserId, users, likes, collects, tipsList);
+    decorated.files = fileDetails;
+    res.json(decorated);
   } catch (e) {
     console.error('Get post error:', e);
     res.status(500).json({ error: '服务器错误' });
@@ -878,20 +788,21 @@ app.post('/api/posts', async (req, res) => {
     const users = await getUsers();
     const user = users.find(u => u.id === userId);
     if (!user) return res.status(401).json({ error: '未登录' });
-    const { content, images, media, files, tags, title, isLongText, location, urlPreviews } = req.body;
+    const { content, images, videos, files, tags, title, location, isLongPost, urlPreviews } = req.body;
     if (!content || !content.trim()) return res.status(400).json({ error: '内容不能为空' });
 
-    const postImages = images || [];
-    const postMedia = media || [];
-    const hasAnyMedia = postImages.length > 0 || postMedia.length > 0 || (files && files.length > 0);
+    const hasImages = (images && images.length > 0) || (videos && videos.length > 0);
+    if (!hasImages) {
+      return res.status(400).json({ error: '请添加至少一张图片' });
+    }
 
     const post = {
       id: genId('post'),
       authorId: userId,
       title: title || '',
       content: content.trim(),
-      images: postImages,
-      media: postMedia,
+      images: images || [],
+      videos: videos || [],
       files: files || [],
       tags: tags || [],
       likeCount: 0,
@@ -899,12 +810,25 @@ app.post('/api/posts', async (req, res) => {
       collectCount: 0,
       coinCount: 0,
       tippedBy: [],
-      isLongText: isLongText || false,
-      location: location || null,
+      location: location || '',
+      isLongPost: !!isLongPost,
       urlPreviews: urlPreviews || [],
       createdAt: Date.now()
     };
     await savePost(post);
+
+    if (files && files.length > 0) {
+      for (const fileInfo of files) {
+        if (fileInfo.id) {
+          const f = await dbGetFileById(fileInfo.id);
+          if (f) {
+            f.postId = post.id;
+            await dbSaveFile(f);
+          }
+        }
+      }
+    }
+
     await addVipExp(userId, 20);
 
     if (tags && tags.length > 0) {
@@ -1575,11 +1499,11 @@ app.post('/api/auth/send-code', async (req, res) => {
     if (!phone || !validatePhone(phone)) {
       return res.status(400).json({ error: '手机号格式不正确' });
     }
-    if (!purpose || !['register', 'bind_phone', 'change_password'].includes(purpose)) {
+    if (!purpose || !['register', 'bind_phone', 'change_password', 'login'].includes(purpose)) {
       return res.status(400).json({ error: '无效的验证类型' });
     }
     
-    const code = generateVerificationCode();
+    const code = generateCode();
     const vc = {
       id: genId('vc'),
       phone,
@@ -1591,12 +1515,13 @@ app.post('/api/auth/send-code', async (req, res) => {
     };
     await saveVerificationCode(vc);
     
-    console.log(`📱 验证码已发送到 ${phone}: ${code} (用途: ${purpose})`);
+    const smsResult = await sendSmsCode(phone, code);
     
+    const isProd = process.env.NODE_ENV === 'production';
     res.json({ 
       success: true, 
-      message: `验证码已发送：${code}`,
-      devCode: code
+      message: '验证码已发送',
+      devCode: isProd && smsResult.provider !== 'console' ? undefined : code
     });
   } catch (e) {
     console.error('Send code error:', e);
@@ -1749,217 +1674,235 @@ app.get('/api/search', async (req, res) => {
 });
 
 // ========== UPLOAD ==========
-app.post('/api/upload', imageUpload.single('image'), async (req, res) => {
+function getUserUploadLimit(user) {
+  if (!user) return { maxSize: 100 * 1024 * 1024, isPermanent: false };
+  if (user.isAdmin) return { maxSize: Infinity, isPermanent: true };
+  if (user.isVip && user.vipLevel >= 2) return { maxSize: 20 * 1024 * 1024 * 1024, isPermanent: true };
+  if (user.isVip && user.vipLevel >= 1) return { maxSize: 16 * 1024 * 1024 * 1024, isPermanent: false };
+  return { maxSize: 1 * 1024 * 1024 * 1024, isPermanent: false };
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return bytes + 'B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + 'KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + 'MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + 'GB';
+}
+
+app.post('/api/upload', upload.single('image'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: '上传失败' });
+  res.json({ url: `/uploads/${req.file.filename}` });
+});
+
+app.post('/api/upload/image', uploadMemory.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: '上传失败' });
-    const availableSpace = checkDiskSpace();
-    if (!isR2Enabled() && availableSpace < req.file.size + 100 * 1024 * 1024) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    if (!req.file) return res.status(400).json({ error: '请选择文件' });
+
+    const users = await getUsers();
+    const user = users.find(u => u.id === userId);
+    const { maxSize } = getUserUploadLimit(user);
+
+    if (req.file.size > maxSize) {
+      let msg = '仅会员可上传超出1GB的文件';
+      if (user?.isVip && user.vipLevel >= 1) msg = '需升级到会员年卡获得最高20GB上传上限';
+      if (user?.isVip && user.vipLevel >= 2) msg = '仅管理员可上传>20GB的文件';
+      return res.status(400).json({ error: msg });
+    }
+
+    const totalUsed = await getUserTotalStorage(userId);
+    if (totalUsed + req.file.size > 50 * 1024 * 1024 * 1024) {
       return res.status(507).json({ error: '上传失败，云端空间不足！' });
     }
-    const userId = getUserId(req);
-    const limitInfo = await getUserUploadLimit(userId);
-    const size = req.file.size;
-    const limitMsg = getUploadLimitMessage(size, limitInfo);
-    if (limitMsg) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
-      return res.status(403).json({ error: limitMsg });
-    }
-    const ext = getFileExtension(req.file.originalname);
-    const fileId = genId('img');
-    const now = Date.now();
-    const FOURTEEN_DAYS = 14 * 24 * 60 * 60 * 1000;
-    const expiresAt = limitInfo.isPermanent ? null : now + FOURTEEN_DAYS;
-    const meta = {
-      id: fileId,
-      filename: req.file.filename,
+
+    const result = await uploadFile(req.file.buffer, req.file.originalname, req.file.mimetype);
+    const { isPermanent } = getUserUploadLimit(user);
+    const expiresAt = isPermanent ? null : Date.now() + 14 * 24 * 60 * 60 * 1000;
+
+    const fileRecord = {
+      id: genId('file'),
+      uploaderId: userId,
       originalName: req.file.originalname,
-      ext: ext,
-      size: size,
-      sizeFormatted: formatFileSize(size),
-      iconType: 'image',
-      uploadedAt: now,
-      expiresAt: expiresAt,
-      isPermanent: limitInfo.isPermanent,
-      uploaderId: userId
+      storedKey: result.key,
+      mimeType: req.file.mimetype || 'application/octet-stream',
+      size: req.file.size,
+      storageType: result.storageType,
+      expiresAt,
+      isPermanent,
+      downloadCount: 0,
+      createdAt: Date.now(),
     };
-    await saveFileMeta(meta);
-    if (isR2Enabled()) {
-      try {
-        await storageSaveFile(req.file.filename, req.file.path, req.file.mimetype || 'image/jpeg');
-      } catch(r2e) {
-        console.error('R2 upload error:', r2e.message);
-        await deleteFileMeta(meta.id);
-        return res.status(500).json({ error: '上传失败，云端存储异常' });
-      }
-    }
+    await dbSaveFile(fileRecord);
+
+    const url = getFileUrl(result.key, result.storageType);
     res.json({
-      url: getPublicUrl(req.file.filename),
-      size: size,
-      sizeFormatted: formatFileSize(size)
+      id: fileRecord.id,
+      url,
+      filename: req.file.originalname,
+      size: req.file.size,
+      mimeType: fileRecord.mimeType,
+      expiresAt,
+      isPermanent,
     });
   } catch (e) {
-    if (e.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ error: '文件过大' });
-    }
-    if (e.code === 'ENOSPC') {
-      return res.status(507).json({ error: '上传失败，云端空间不足！' });
-    }
-    console.error('Image upload error:', e);
-    res.status(500).json({ error: '上传失败' });
+    console.error('Upload error:', e);
+    res.status(500).json({ error: '上传失败: ' + e.message });
   }
 });
 
-app.post('/api/upload/media', mediaUpload.single('file'), async (req, res) => {
+app.post('/api/upload/file', uploadMemory.single('file'), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: '上传失败' });
-    const availableSpace = checkDiskSpace();
-    if (!isR2Enabled() && availableSpace < req.file.size + 100 * 1024 * 1024) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
-      return res.status(507).json({ error: '上传失败，云端空间不足！' });
-    }
     const userId = getUserId(req);
-    const limitInfo = await getUserUploadLimit(userId);
-    const size = req.file.size;
-    const limitMsg = getUploadLimitMessage(size, limitInfo);
-    if (limitMsg) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
-      return res.status(403).json({ error: limitMsg });
-    }
-    const ext = getFileExtension(req.file.originalname);
-    const mimetype = req.file.mimetype || '';
-    const mediaType = mimetype.startsWith('video/') ? 'video' : mimetype.startsWith('image/') ? 'image' : 'file';
-    const fileId = genId('med');
-    const now = Date.now();
-    const FOURTEEN_DAYS = 14 * 24 * 60 * 60 * 1000;
-    const expiresAt = limitInfo.isPermanent ? null : now + FOURTEEN_DAYS;
-    const meta = {
-      id: fileId,
-      filename: req.file.filename,
-      originalName: req.file.originalname,
-      ext: ext,
-      size: size,
-      sizeFormatted: formatFileSize(size),
-      iconType: mediaType,
-      uploadedAt: now,
-      expiresAt: expiresAt,
-      isPermanent: limitInfo.isPermanent,
-      uploaderId: userId
-    };
-    await saveFileMeta(meta);
-    if (isR2Enabled()) {
-      try {
-        await storageSaveFile(req.file.filename, req.file.path, req.file.mimetype || 'application/octet-stream');
-      } catch(r2e) {
-        console.error('R2 upload error:', r2e.message);
-        await deleteFileMeta(meta.id);
-        return res.status(500).json({ error: '上传失败，云端存储异常' });
-      }
-    }
-    res.json({
-      url: getPublicUrl(req.file.filename),
-      type: mediaType,
-      ext: ext,
-      size: size,
-      sizeFormatted: formatFileSize(size)
-    });
-  } catch (e) {
-    if (e.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ error: '文件过大' });
-    }
-    if (e.code === 'ENOSPC') {
-      return res.status(507).json({ error: '上传失败，云端空间不足！' });
-    }
-    console.error('Media upload error:', e);
-    res.status(500).json({ error: '上传失败' });
-  }
-});
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    if (!req.file) return res.status(400).json({ error: '请选择文件' });
 
-app.post('/api/upload/file', fileUpload.single('file'), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: '上传失败' });
-    const availableSpace = checkDiskSpace();
-    if (!isR2Enabled() && availableSpace < req.file.size + 100 * 1024 * 1024) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
+    const users = await getUsers();
+    const user = users.find(u => u.id === userId);
+    const { maxSize, isPermanent: perm } = getUserUploadLimit(user);
+
+    if (req.file.size > maxSize) {
+      let msg = '仅会员可上传超出1GB的文件';
+      if (user?.isVip && user.vipLevel >= 1) msg = '需升级到会员年卡获得最高20GB上传上限';
+      if (user?.isVip && user.vipLevel >= 2) msg = '仅管理员可上传>20GB的文件';
+      return res.status(400).json({ error: msg });
+    }
+
+    const totalUsed = await getUserTotalStorage(userId);
+    if (totalUsed + req.file.size > 50 * 1024 * 1024 * 1024) {
       return res.status(507).json({ error: '上传失败，云端空间不足！' });
     }
-    const userId = getUserId(req);
-    const limitInfo = await getUserUploadLimit(userId);
-    const size = req.file.size;
-    const limitMsg = getUploadLimitMessage(size, limitInfo);
-    if (limitMsg) {
-      try { fs.unlinkSync(req.file.path); } catch(e) {}
-      return res.status(403).json({ error: limitMsg });
-    }
-    const ext = getFileExtension(req.file.originalname);
-    const fileId = genId('file');
-    const now = Date.now();
-    const FOURTEEN_DAYS = 14 * 24 * 60 * 60 * 1000;
-    const expiresAt = limitInfo.isPermanent ? null : now + FOURTEEN_DAYS;
-    const iconType = getFileIconByExt(ext);
-    const meta = {
-      id: fileId,
-      filename: req.file.filename,
+
+    const result = await uploadFile(req.file.buffer, req.file.originalname, req.file.mimetype);
+    const expiresAt = perm ? null : Date.now() + 14 * 24 * 60 * 60 * 1000;
+
+    const fileRecord = {
+      id: genId('file'),
+      uploaderId: userId,
       originalName: req.file.originalname,
-      ext: ext,
-      size: size,
-      sizeFormatted: formatFileSize(size),
-      iconType: iconType,
-      uploadedAt: now,
-      expiresAt: expiresAt,
-      isPermanent: limitInfo.isPermanent,
-      uploaderId: userId
+      storedKey: result.key,
+      mimeType: req.file.mimetype || 'application/octet-stream',
+      size: req.file.size,
+      storageType: result.storageType,
+      expiresAt,
+      isPermanent: perm,
+      downloadCount: 0,
+      createdAt: Date.now(),
     };
-    await saveFileMeta(meta);
-    if (isR2Enabled()) {
-      try {
-        await storageSaveFile(req.file.filename, req.file.path, req.file.mimetype || 'application/octet-stream');
-      } catch(r2e) {
-        console.error('R2 upload error:', r2e.message);
-        await deleteFileMeta(meta.id);
-        return res.status(500).json({ error: '上传失败，云端存储异常' });
-      }
-    }
+    await dbSaveFile(fileRecord);
+
+    const url = getFileUrl(result.key, result.storageType);
     res.json({
-      id: fileId,
-      url: getPublicUrl(req.file.filename),
-      originalName: req.file.originalname,
-      ext: ext,
-      size: size,
-      sizeFormatted: formatFileSize(size),
-      iconType: iconType,
-      expiresAt: expiresAt,
-      isPermanent: limitInfo.isPermanent
+      id: fileRecord.id,
+      url,
+      filename: req.file.originalname,
+      size: req.file.size,
+      mimeType: fileRecord.mimeType,
+      expiresAt,
+      isPermanent: perm,
     });
   } catch (e) {
-    if (e.code === 'ENOSPC') {
-      return res.status(507).json({ error: '上传失败，云端空间不足！' });
-    }
     console.error('File upload error:', e);
-    res.status(500).json({ error: '上传失败' });
+    res.status(500).json({ error: '上传失败: ' + e.message });
   }
 });
 
-app.get('/api/files/:id/info', async (req, res) => {
+app.get('/api/files/:id', async (req, res) => {
   try {
-    const meta = await getFileMeta(req.params.id);
-    if (!meta) return res.status(404).json({ error: '文件不存在或已过期' });
-    if (meta.expiresAt && meta.expiresAt < Date.now()) {
-      return res.status(404).json({ error: '文件不存在或已过期' });
+    const file = await dbGetFileById(req.params.id);
+    if (!file) return res.status(404).json({ error: '文件不存在或已过期' });
+    if (file.expiresAt && file.expiresAt < Date.now() && !file.isPermanent) {
+      return res.status(410).json({ error: '文件已过期' });
     }
     res.json({
-      id: meta.id,
-      url: getPublicUrl(meta.filename),
-      originalName: meta.originalName,
-      ext: meta.ext,
-      size: meta.size,
-      sizeFormatted: meta.sizeFormatted,
-      iconType: meta.iconType,
-      expiresAt: meta.expiresAt,
-      isPermanent: meta.isPermanent
+      id: file.id,
+      filename: file.originalName,
+      size: file.size,
+      mimeType: file.mimeType,
+      url: getFileUrl(file.storedKey, file.storageType),
+      expiresAt: file.expiresAt,
+      isPermanent: file.isPermanent,
+      downloadCount: file.downloadCount,
+      createdAt: file.createdAt,
     });
   } catch (e) {
     res.status(500).json({ error: '获取文件信息失败' });
+  }
+});
+
+app.get('/api/files/:id/download', async (req, res) => {
+  try {
+    const file = await dbGetFileById(req.params.id);
+    if (!file) return res.status(404).json({ error: '文件不存在或已过期' });
+    if (file.expiresAt && file.expiresAt < Date.now() && !file.isPermanent) {
+      return res.status(410).json({ error: '文件已过期' });
+    }
+
+    await incrementFileDownload(file.id);
+
+    const stream = await getFileStream(file.storedKey, file.storageType);
+    if (!stream) return res.status(404).json({ error: '文件不存在' });
+
+    res.setHeader('Content-Type', file.mimeType || 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.originalName)}"`);
+    if (stream.contentLength) res.setHeader('Content-Length', stream.contentLength);
+    stream.stream.pipe(res);
+  } catch (e) {
+    console.error('Download error:', e);
+    res.status(500).json({ error: '下载失败' });
+  }
+});
+
+app.get('/api/files/serve/:key', async (req, res) => {
+  try {
+    const key = req.params.key;
+    const result = await getFileStream(key, 's3');
+    if (!result) return res.status(404).send('Not found');
+    if (result.contentType) res.setHeader('Content-Type', result.contentType);
+    result.stream.pipe(res);
+  } catch (e) {
+    res.status(404).send('Not found');
+  }
+});
+
+// ========== URL PREVIEW ==========
+app.get('/api/url-preview', async (req, res) => {
+  try {
+    const url = req.query.url;
+    if (!url) return res.status(400).json({ error: '缺少URL参数' });
+
+    const cached = await dbGetUrlPreview(url);
+    const oneHourAgo = Date.now() - 60 * 60 * 1000;
+    if (cached && cached.fetchedAt && cached.fetchedAt > oneHourAgo && cached.title) {
+      return res.json(cached);
+    }
+
+    const preview = await fetchUrlPreview(url);
+    await dbSaveUrlPreview(preview);
+    res.json(preview);
+  } catch (e) {
+    console.error('URL preview error:', e);
+    res.json({ url: req.query.url, title: req.query.url, description: '', favicon: null, siteName: '', fetchedAt: Date.now() });
+  }
+});
+
+// ========== REPORT ==========
+app.post('/api/reports', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const { targetType, targetId, reason } = req.body;
+    if (!targetType || !targetId) return res.status(400).json({ error: '参数不完整' });
+    await dbSaveReport({
+      id: genId('report'),
+      reporterId: userId,
+      targetType, targetId,
+      reason: reason || '',
+      createdAt: Date.now(),
+    });
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: '举报失败' });
   }
 });
 
@@ -2412,8 +2355,8 @@ app.use((req, res) => {
 
 async function startServer() {
   await initDB();
+  await initStorage();
   await seedInitialData();
-  cleanupExpiredFiles();
   const users = await getUsers();
   const posts = await getPosts();
   let assistantUser = users.find(u => u.username === '文书小助手');
@@ -2563,16 +2506,10 @@ async function startServer() {
     res.json(book);
   });
 
-  app.post('/api/books/upload', auth, fileUpload.single('file'), async (req, res) => {
+  app.post('/api/books/upload', auth, upload.single('file'), async (req, res) => {
     if (!req.file) return res.status(400).json({ error: '请选择文件' });
-    if (isR2Enabled()) {
-      try {
-        await storageSaveFile(req.file.filename, req.file.path, req.file.mimetype || 'application/octet-stream');
-      } catch(r2e) {
-        return res.status(500).json({ error: '上传失败，云端存储异常' });
-      }
-    }
-    res.json({ url: getPublicUrl(req.file.filename), filename: req.file.originalname });
+    const fileUrl = `/uploads/${req.file.filename}`;
+    res.json({ url: fileUrl, filename: req.file.originalname });
   });
 
   app.post('/api/books/:id/read', authOptional, async (req, res) => {
@@ -2739,6 +2676,21 @@ async function startServer() {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 文书APP后端服务运行在 port ${PORT}`);
   });
+
+  setInterval(async () => {
+    try {
+      const expired = await getExpiredFiles();
+      for (const f of expired) {
+        await deleteStorageFile(f.storedKey, f.storageType);
+        await dbDeleteFile(f.id);
+      }
+      if (expired.length > 0) {
+        console.log(`🧹 Cleaned up ${expired.length} expired files`);
+      }
+    } catch (e) {
+      console.warn('File cleanup error:', e.message);
+    }
+  }, 60 * 60 * 1000);
 }
 
 startServer().catch(e => {
