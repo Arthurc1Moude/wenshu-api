@@ -61,8 +61,6 @@ export async function initTables() {
       )
     `);
 
-    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL`);
-
     await client.query(`
       CREATE TABLE IF NOT EXISTS posts (
         id TEXT PRIMARY KEY,
