@@ -38,7 +38,17 @@ async function initS3() {
 }
 
 function getLocalDir() {
-  const dir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'uploads');
+  let dirname;
+  try {
+    const fileUrl = new URL(import.meta.url);
+    dirname = path.dirname(fileUrl.pathname);
+    if (process.platform === 'win32' && dirname.startsWith('/')) {
+      dirname = dirname.substring(1);
+    }
+  } catch (e) {
+    dirname = process.cwd();
+  }
+  const dir = path.join(dirname, '..', 'uploads');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }

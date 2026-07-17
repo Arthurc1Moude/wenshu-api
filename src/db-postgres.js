@@ -35,7 +35,7 @@ export async function initTables() {
         id TEXT PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
-        phone TEXT UNIQUE,
+        phone TEXT,
         avatar TEXT,
         cover TEXT,
         bio TEXT DEFAULT '',
@@ -128,6 +128,7 @@ export async function initTables() {
         content TEXT NOT NULL,
         from_user_id TEXT,
         post_id TEXT,
+        comment_id TEXT,
         is_read BOOLEAN DEFAULT false,
         created_at BIGINT
       )
@@ -352,8 +353,11 @@ export async function initTables() {
     await client.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_long_post BOOLEAN DEFAULT false`);
     await client.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS url_previews JSONB DEFAULT '[]'::jsonb`);
 
+    await client.query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS comment_id TEXT`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_notifications_comment ON notifications(comment_id)`);
+
     const userAlterColumns = [
-      'phone TEXT UNIQUE',
+      'phone TEXT',
       'avatar TEXT',
       'cover TEXT',
       'bio TEXT DEFAULT \'\'',
@@ -386,6 +390,12 @@ export async function initTables() {
       }
     }
 
+    try {
+      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL`);
+    } catch (e) {
+      console.warn('Phone unique index may already exist:', e.message);
+    }
+
     console.log('✅ PostgreSQL tables initialized');
   } finally {
     client.release();
@@ -403,7 +413,7 @@ function rowToUser(row) {
     cover: row.cover,
     bio: row.bio || '',
     location: row.location || '',
-    wenshuCoin: row.wenshu_coin || 0,
+    wenshuCoin: Number(row.wenshu_coin || 0),
     isVip: row.is_vip || false,
     vipLevel: row.vip_level || 0,
     vipExp: row.vip_exp || 0,
@@ -424,6 +434,14 @@ function rowToUser(row) {
   };
 }
 
+function parseJsonb(val, defaultVal) {
+  if (val == null) return defaultVal;
+  if (typeof val === 'string') {
+    try { return JSON.parse(val); } catch (e) { return defaultVal; }
+  }
+  return val;
+}
+
 function rowToPost(row) {
   if (!row) return null;
   return {
@@ -431,18 +449,18 @@ function rowToPost(row) {
     authorId: row.author_id,
     title: row.title || '',
     content: row.content,
-    images: row.images || [],
-    videos: row.videos || [],
-    files: row.files || [],
-    tags: row.tags || [],
+    images: parseJsonb(row.images, []),
+    videos: parseJsonb(row.videos, []),
+    files: parseJsonb(row.files, []),
+    tags: parseJsonb(row.tags, []),
     likeCount: row.like_count || 0,
     commentCount: row.comment_count || 0,
     collectCount: row.collect_count || 0,
     coinCount: row.coin_count || 0,
-    tippedBy: row.tipped_by || [],
+    tippedBy: parseJsonb(row.tipped_by, []),
     location: row.location || '',
     isLongPost: row.is_long_post || false,
-    urlPreviews: row.url_previews || [],
+    urlPreviews: parseJsonb(row.url_previews, []),
     createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
 }
@@ -484,6 +502,7 @@ function rowToNotification(row) {
     content: row.content,
     fromUserId: row.from_user_id,
     postId: row.post_id,
+    commentId: row.comment_id || null,
     isRead: row.is_read,
     createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
@@ -587,11 +606,11 @@ export async function pgSaveUser(user) {
       joined_qq_group = EXCLUDED.joined_qq_group, is_admin = EXCLUDED.is_admin, is_banned = EXCLUDED.is_banned,
       ban_until = EXCLUDED.ban_until, ban_reason = EXCLUDED.ban_reason
   `, [
-    user.id, user.username, user.password, user.phone, user.avatar, user.cover, user.bio || '', user.location || '',
-    user.wenshuCoin || 0, user.isVip || false, user.vipLevel || 0, user.vipExp || 0, user.vipExpiresAt,
+    user.id, user.username, user.password, user.phone || null, user.avatar || null, user.cover || null, user.bio || '', user.location || '',
+    user.wenshuCoin || 0, user.isVip || false, user.vipLevel || 0, user.vipExp || 0, user.vipExpiresAt || null,
     user.followingCount || 0, user.followersCount || 0, user.likesCount || 0, user.registerRank || 0,
     user.isSignedInToday || false, user.lastSignInDate || '', user.consecutiveSignDays || 0,
-    user.createdAt, user.joinedQQGroup || false, user.isAdmin || false, user.isBanned || false,
+    user.createdAt || Date.now(), user.joinedQQGroup || false, user.isAdmin || false, user.isBanned || false,
     user.banUntil || null, user.banReason || null
   ]);
 }
@@ -692,10 +711,10 @@ export async function pgGetNotifications() {
 
 export async function pgSaveNotification(notif) {
   await pool.query(`
-    INSERT INTO notifications (id, user_id, type, content, from_user_id, post_id, is_read, created_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-    ON CONFLICT (id) DO UPDATE SET is_read = EXCLUDED.is_read
-  `, [notif.id, notif.userId, notif.type, notif.content, notif.fromUserId, notif.postId, notif.isRead, notif.createdAt]);
+    INSERT INTO notifications (id, user_id, type, content, from_user_id, post_id, comment_id, is_read, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    ON CONFLICT (id) DO UPDATE SET is_read = EXCLUDED.is_read, comment_id = EXCLUDED.comment_id
+  `, [notif.id, notif.userId, notif.type, notif.content, notif.fromUserId, notif.postId, notif.commentId || null, notif.isRead, notif.createdAt]);
 }
 
 export async function pgGetConversations() {
