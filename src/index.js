@@ -55,6 +55,18 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+let isServerReady = false;
+
+app.use((req, res, next) => {
+  if (!isServerReady && !req.path.startsWith('/api/health')) {
+    return res.status(503).json({ error: '服务器正在启动中，请稍后重试' });
+  }
+  next();
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: isServerReady ? 'ok' : 'starting', port: PORT });
+});
 
 app.use(cors({
   origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN.split(','),
@@ -2458,6 +2470,10 @@ app.use((req, res) => {
 });
 
 async function startServer() {
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 文书APP后端服务运行在 port ${PORT}`);
+  });
+
   await initDB();
   await initStorage();
   await seedInitialData();
@@ -2791,9 +2807,8 @@ async function startServer() {
     next();
   });
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 文书APP后端服务运行在 port ${PORT}`);
-  });
+  isServerReady = true;
+  console.log('✅ 服务器初始化完成，准备接收请求');
 
   setInterval(async () => {
     try {
