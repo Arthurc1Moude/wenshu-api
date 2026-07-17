@@ -35,7 +35,7 @@ export async function initTables() {
         id TEXT PRIMARY KEY,
         username TEXT UNIQUE NOT NULL,
         password TEXT NOT NULL,
-        phone TEXT UNIQUE,
+        phone TEXT,
         avatar TEXT,
         cover TEXT,
         bio TEXT DEFAULT '',
@@ -60,6 +60,8 @@ export async function initTables() {
         ban_reason TEXT
       )
     `);
+
+    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS posts (
@@ -353,7 +355,7 @@ export async function initTables() {
     await client.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS url_previews JSONB DEFAULT '[]'::jsonb`);
 
     const userAlterColumns = [
-      'phone TEXT UNIQUE',
+      'phone TEXT',
       'avatar TEXT',
       'cover TEXT',
       'bio TEXT DEFAULT \'\'',
@@ -384,6 +386,12 @@ export async function initTables() {
       } catch (e) {
         console.warn(`Column ${colName} may already exist:`, e.message);
       }
+    }
+
+    try {
+      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone) WHERE phone IS NOT NULL`);
+    } catch (e) {
+      console.warn('Phone unique index may already exist:', e.message);
     }
 
     console.log('✅ PostgreSQL tables initialized');
@@ -424,6 +432,14 @@ function rowToUser(row) {
   };
 }
 
+function parseJsonb(val, defaultVal) {
+  if (val == null) return defaultVal;
+  if (typeof val === 'string') {
+    try { return JSON.parse(val); } catch (e) { return defaultVal; }
+  }
+  return val;
+}
+
 function rowToPost(row) {
   if (!row) return null;
   return {
@@ -431,18 +447,18 @@ function rowToPost(row) {
     authorId: row.author_id,
     title: row.title || '',
     content: row.content,
-    images: row.images || [],
-    videos: row.videos || [],
-    files: row.files || [],
-    tags: row.tags || [],
+    images: parseJsonb(row.images, []),
+    videos: parseJsonb(row.videos, []),
+    files: parseJsonb(row.files, []),
+    tags: parseJsonb(row.tags, []),
     likeCount: row.like_count || 0,
     commentCount: row.comment_count || 0,
     collectCount: row.collect_count || 0,
     coinCount: row.coin_count || 0,
-    tippedBy: row.tipped_by || [],
+    tippedBy: parseJsonb(row.tipped_by, []),
     location: row.location || '',
     isLongPost: row.is_long_post || false,
-    urlPreviews: row.url_previews || [],
+    urlPreviews: parseJsonb(row.url_previews, []),
     createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
 }
@@ -587,11 +603,11 @@ export async function pgSaveUser(user) {
       joined_qq_group = EXCLUDED.joined_qq_group, is_admin = EXCLUDED.is_admin, is_banned = EXCLUDED.is_banned,
       ban_until = EXCLUDED.ban_until, ban_reason = EXCLUDED.ban_reason
   `, [
-    user.id, user.username, user.password, user.phone, user.avatar, user.cover, user.bio || '', user.location || '',
-    user.wenshuCoin || 0, user.isVip || false, user.vipLevel || 0, user.vipExp || 0, user.vipExpiresAt,
+    user.id, user.username, user.password, user.phone || null, user.avatar || null, user.cover || null, user.bio || '', user.location || '',
+    user.wenshuCoin || 0, user.isVip || false, user.vipLevel || 0, user.vipExp || 0, user.vipExpiresAt || null,
     user.followingCount || 0, user.followersCount || 0, user.likesCount || 0, user.registerRank || 0,
     user.isSignedInToday || false, user.lastSignInDate || '', user.consecutiveSignDays || 0,
-    user.createdAt, user.joinedQQGroup || false, user.isAdmin || false, user.isBanned || false,
+    user.createdAt || Date.now(), user.joinedQQGroup || false, user.isAdmin || false, user.isBanned || false,
     user.banUntil || null, user.banReason || null
   ]);
 }

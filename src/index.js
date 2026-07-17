@@ -68,7 +68,7 @@ if (!fs.existsSync(uploadsDir)) {
 }
 app.use('/uploads', express.static(uploadsDir));
 
-const MEM_STORAGE_LIMIT = 200 * 1024 * 1024;
+const MEM_STORAGE_LIMIT = 2000 * 1024 * 1024;
 const memoryStorage = multer.memoryStorage();
 const uploadMemory = multer({ storage: memoryStorage, limits: { fileSize: MEM_STORAGE_LIMIT } });
 
@@ -215,8 +215,23 @@ function decoratePost(post, currentUserId, users, likes, collects, tips) {
   const tippedBy = post.tippedBy || (tips ? tips.filter(t => t.postId === post.id).map(t => t.userId) : []);
   const isTipped = currentUserId ? (tippedBy.includes(currentUserId) || (tips ? tips.some(t => t.postId === post.id && t.userId === currentUserId) : false)) : false;
   return {
-    ...post,
+    id: post.id,
+    authorId: post.authorId,
+    title: post.title || '',
+    content: post.content || '',
+    images: Array.isArray(post.images) ? post.images : [],
+    videos: Array.isArray(post.videos) ? post.videos : [],
+    files: Array.isArray(post.files) ? post.files : [],
+    tags: Array.isArray(post.tags) ? post.tags : [],
+    likeCount: post.likeCount || 0,
+    commentCount: post.commentCount || 0,
+    collectCount: post.collectCount || 0,
+    urlPreviews: Array.isArray(post.urlPreviews) ? post.urlPreviews : [],
+    location: post.location || '',
+    isLongPost: post.isLongPost || false,
+    createdAt: post.createdAt || Date.now(),
     coinCount,
+    tippedBy: Array.isArray(tippedBy) ? tippedBy : [],
     author: author ? getUserPublic(author) : null,
     isLiked: currentUserId ? likes.some(l => l.postId === post.id && l.userId === currentUserId) : false,
     isCollected: currentUserId ? collects.some(c => c.postId === post.id && c.userId === currentUserId) : false,
@@ -979,6 +994,43 @@ app.post('/api/posts/:id/tip', async (req, res) => {
   }
 });
 
+app.delete('/api/posts/:id', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const posts = await getPosts();
+    const idx = posts.findIndex(p => p.id === req.params.id);
+    if (idx === -1) return res.status(404).json({ error: '帖子不存在' });
+    const post = posts[idx];
+
+    const users = await getUsers();
+    const me = users.find(u => u.id === userId);
+    if (post.authorId !== userId && !(me && me.isAdmin)) {
+      return res.status(403).json({ error: '无权限删除此帖子' });
+    }
+
+    posts.splice(idx, 1);
+    await savePosts(posts);
+
+    const likes = await getLikes();
+    const newLikes = likes.filter(l => l.postId !== post.id);
+    await saveLikes(newLikes);
+
+    const collects = await getCollects();
+    const newCollects = collects.filter(c => c.postId !== post.id);
+    await saveCollects(newCollects);
+
+    const comments = await getComments();
+    const newComments = comments.filter(c => c.postId !== post.id);
+    await saveComments(newComments);
+
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Delete post error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
 // ========== SHARE LINKS ==========
 app.get('/api/share/:type/:id', async (req, res) => {
   try {
@@ -1689,9 +1741,61 @@ function formatSize(bytes) {
   return (bytes / (1024 * 1024 * 1024)).toFixed(2) + 'GB';
 }
 
-app.post('/api/upload', upload.single('image'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: '上传失败' });
-  res.json({ url: `/uploads/${req.file.filename}` });
+app.post('/api/upload', uploadMemory.any(), async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const uploadedFile = req.files && req.files.length > 0 ? req.files[0] : null;
+    if (!uploadedFile) return res.status(400).json({ error: '请选择文件' });
+
+    const users = await getUsers();
+    const user = users.find(u => u.id === userId);
+    const { maxSize, isPermanent } = getUserUploadLimit(user);
+
+    if (uploadedFile.size > maxSize) {
+      let msg = '仅会员可上传超出1GB的文件';
+      if (user?.isVip && user.vipLevel >= 1) msg = '需升级到会员年卡获得最高20GB上传上限';
+      if (user?.isVip && user.vipLevel >= 2) msg = '仅管理员可上传>20GB的文件';
+      return res.status(400).json({ error: msg });
+    }
+
+    const totalUsed = await getUserTotalStorage(userId);
+    if (totalUsed + uploadedFile.size > 50 * 1024 * 1024 * 1024) {
+      return res.status(507).json({ error: '上传失败，云端空间不足！' });
+    }
+
+    const result = await uploadFile(uploadedFile.buffer, uploadedFile.originalname, uploadedFile.mimetype);
+    const expiresAt = isPermanent ? null : Date.now() + 14 * 24 * 60 * 60 * 1000;
+
+    const fileRecord = {
+      id: genId('file'),
+      uploaderId: userId,
+      originalName: uploadedFile.originalname,
+      storedKey: result.key,
+      mimeType: uploadedFile.mimetype || 'application/octet-stream',
+      size: uploadedFile.size,
+      storageType: result.storageType,
+      expiresAt,
+      isPermanent,
+      downloadCount: 0,
+      createdAt: Date.now(),
+    };
+    await dbSaveFile(fileRecord);
+
+    const url = getFileUrl(result.key, result.storageType);
+    res.json({
+      id: fileRecord.id,
+      url,
+      filename: uploadedFile.originalname,
+      size: uploadedFile.size,
+      mimeType: fileRecord.mimeType,
+      expiresAt,
+      isPermanent,
+    });
+  } catch (e) {
+    console.error('Upload error:', e);
+    res.status(500).json({ error: '上传失败: ' + e.message });
+  }
 });
 
 app.post('/api/upload/image', uploadMemory.single('file'), async (req, res) => {
@@ -2671,6 +2775,20 @@ async function startServer() {
     if (uid === req.params.userId) return res.json({ success: true });
     await addSecretVisit({ id: genId('sv'), spaceOwnerId: req.params.userId, visitorId: uid, createdAt: Date.now() });
     res.json({ success: true });
+  });
+
+  app.use((err, req, res, next) => {
+    if (err) {
+      console.error('Server error:', err);
+      if (err.name === 'MulterError') {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(400).json({ error: '文件大小超出限制' });
+        }
+        return res.status(400).json({ error: '文件上传错误: ' + err.message });
+      }
+      return res.status(500).json({ error: err.message || '服务器内部错误' });
+    }
+    next();
   });
 
   app.listen(PORT, '0.0.0.0', () => {
