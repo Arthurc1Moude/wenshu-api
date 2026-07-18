@@ -1656,14 +1656,28 @@ app.post('/api/auth/change-password', async (req, res) => {
     const userId = getUserId(req);
     if (!userId) return res.status(401).json({ error: '未登录' });
     
-    const { oldPassword, newPassword, confirmPassword, phone, code } = req.body;
+    const { oldPassword, newPassword, confirmPassword } = req.body;
     
     const users = await getUsers();
     const me = users.find(u => u.id === userId);
     if (!me) return res.status(401).json({ error: '用户不存在' });
     
+    if (!me.phone || me.phone.length === 0) {
+      return res.status(400).json({ error: '必须先绑定手机号码', code: 'PHONE_REQUIRED' });
+    }
+    
+    if (!oldPassword) {
+      return res.status(400).json({ error: '请输入原密码' });
+    }
+    if (me.password !== oldPassword) {
+      return res.status(400).json({ error: '原密码错误' });
+    }
+    
     if (!newPassword || !confirmPassword) {
       return res.status(400).json({ error: '请输入新密码并确认' });
+    }
+    if (newPassword === oldPassword) {
+      return res.status(400).json({ error: '新密码不能与原密码相同' });
     }
     if (newPassword !== confirmPassword) {
       return res.status(400).json({ error: '两次密码输入不一致' });
@@ -1672,27 +1686,6 @@ app.post('/api/auth/change-password', async (req, res) => {
     const pwdValidation = validatePassword(newPassword);
     if (!pwdValidation.valid) {
       return res.status(400).json({ error: pwdValidation.message });
-    }
-    
-    if (me.phone) {
-      if (!phone || !code) {
-        return res.status(400).json({ error: '请输入手机号和验证码' });
-      }
-      if (phone !== me.phone) {
-        return res.status(400).json({ error: '请输入绑定的手机号' });
-      }
-      const vc = await findValidVerificationCode(phone, code, 'change_password');
-      if (!vc) {
-        return res.status(400).json({ error: '验证码错误或已过期' });
-      }
-      await markVerificationCodeUsed(vc.id);
-    } else {
-      if (!oldPassword) {
-        return res.status(400).json({ error: '请输入原密码' });
-      }
-      if (me.password !== oldPassword) {
-        return res.status(400).json({ error: '原密码错误' });
-      }
     }
     
     me.password = newPassword;
