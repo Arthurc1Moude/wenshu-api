@@ -19,7 +19,7 @@ import {
   pgGetCommentLikes, pgAddCommentLike, pgDeleteCommentLike, pgGetCommentLikeCount, pgIsCommentLikedByUser,
   pgGetGroupChats, pgGetGroupChatById, pgGetGroupChatByNumber, pgSaveGroupChat,
   pgGetGroupMembers, pgGetUserGroups, pgAddGroupMember, pgRemoveGroupMember, pgIsGroupMember, pgGenerateGroupNumber,
-  pgSaveFile, pgGetFileById, pgGetFilesByPost, pgGetFilesByUploader, pgDeleteFile,
+  pgSaveFile, pgGetFileById, pgGetFilesByPost, pgGetFilesByUploader, pgGetAllFiles, pgDeleteFile,
   pgIncrementFileDownload, pgGetExpiredFiles, pgGetUserTotalStorage,
   pgSaveUrlPreview, pgGetUrlPreview,
   pgSaveReport,
@@ -331,7 +331,13 @@ export async function getFilesByPost(postId) {
   return pgGetFilesByPost(postId);
 }
 export async function getFilesByUploader(uploaderId) {
-  if (useMem) return memFiles.filter(f => f.uploaderId === uploaderId);
+  if (useMem) {
+    if (uploaderId === null || uploaderId === undefined) return [...memFiles];
+    return memFiles.filter(f => f.uploaderId === uploaderId);
+  }
+  if (uploaderId === null || uploaderId === undefined) {
+    return pgGetAllFiles();
+  }
   return pgGetFilesByUploader(uploaderId);
 }
 export async function deleteFile(id) {
@@ -347,7 +353,14 @@ export async function incrementFileDownload(id) {
   return pgIncrementFileDownload(id);
 }
 export async function getExpiredFiles() {
-  if (useMem) { const now = Date.now(); return memFiles.filter(f => f.expiresAt && f.expiresAt < now && !f.isPermanent); }
+  if (useMem) { 
+    const now = Date.now(); 
+    return memFiles.filter(f => {
+      if (f.isPermanent) return false;
+      const deleteTime = f.deleteAt || f.expiresAt;
+      return deleteTime && now > deleteTime;
+    }); 
+  }
   return pgGetExpiredFiles();
 }
 export async function getUserTotalStorage(uploaderId) {

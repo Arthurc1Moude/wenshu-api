@@ -128,6 +128,7 @@ export async function initTables() {
         content TEXT NOT NULL,
         from_user_id TEXT,
         post_id TEXT,
+        comment_id TEXT,
         is_read BOOLEAN DEFAULT false,
         created_at BIGINT
       )
@@ -274,11 +275,16 @@ export async function initTables() {
         size BIGINT DEFAULT 0,
         storage_type TEXT DEFAULT 'local',
         expires_at BIGINT,
+        delete_at BIGINT,
         is_permanent BOOLEAN DEFAULT false,
         download_count INTEGER DEFAULT 0,
         created_at BIGINT
       )
     `);
+
+    await client.query(`
+      ALTER TABLE files ADD COLUMN IF NOT EXISTS delete_at BIGINT
+    `).catch(() => {});
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS url_previews (
@@ -352,6 +358,9 @@ export async function initTables() {
     await client.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_long_post BOOLEAN DEFAULT false`);
     await client.query(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS url_previews JSONB DEFAULT '[]'::jsonb`);
 
+    await client.query(`ALTER TABLE notifications ADD COLUMN IF NOT EXISTS comment_id TEXT`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_notifications_comment ON notifications(comment_id)`);
+
     const userAlterColumns = [
       'phone TEXT',
       'avatar TEXT',
@@ -375,7 +384,10 @@ export async function initTables() {
       'is_admin BOOLEAN DEFAULT false',
       'is_banned BOOLEAN DEFAULT false',
       'ban_until BIGINT',
-      'ban_reason TEXT'
+      'ban_reason TEXT',
+      'display_name TEXT',
+      'parent_user_id TEXT',
+      'admin_activated BOOLEAN DEFAULT false'
     ];
     for (const col of userAlterColumns) {
       const colName = col.split(' ')[0];
@@ -409,24 +421,27 @@ function rowToUser(row) {
     cover: row.cover,
     bio: row.bio || '',
     location: row.location || '',
-    wenshuCoin: row.wenshu_coin || 0,
+    wenshuCoin: Number(row.wenshu_coin || 0),
     isVip: row.is_vip || false,
-    vipLevel: row.vip_level || 0,
-    vipExp: row.vip_exp || 0,
+    vipLevel: Number(row.vip_level || 0),
+    vipExp: Number(row.vip_exp || 0),
     vipExpiresAt: row.vip_expires_at,
-    followingCount: row.following_count || 0,
-    followersCount: row.followers_count || 0,
-    likesCount: row.likes_count || 0,
-    registerRank: row.register_rank || 0,
+    followingCount: Number(row.following_count || 0),
+    followersCount: Number(row.followers_count || 0),
+    likesCount: Number(row.likes_count || 0),
+    registerRank: Number(row.register_rank || 0),
     isSignedInToday: row.is_signed_in_today || false,
     lastSignInDate: row.last_sign_in_date || '',
-    consecutiveSignDays: row.consecutive_sign_days || 0,
-    createdAt: row.created_at,
+    consecutiveSignDays: Number(row.consecutive_sign_days || 0),
+    createdAt: Number(row.created_at),
     joinedQQGroup: row.joined_qq_group || false,
     isAdmin: row.is_admin || false,
     isBanned: row.is_banned || false,
     banUntil: row.ban_until,
     banReason: row.ban_reason,
+    displayName: row.display_name || null,
+    parentUserId: row.parent_user_id || null,
+    adminActivated: row.admin_activated || false,
   };
 }
 
@@ -498,6 +513,7 @@ function rowToNotification(row) {
     content: row.content,
     fromUserId: row.from_user_id,
     postId: row.post_id,
+    commentId: row.comment_id || null,
     isRead: row.is_read,
     createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
@@ -589,8 +605,8 @@ export async function pgGetUsers() {
 
 export async function pgSaveUser(user) {
   await pool.query(`
-    INSERT INTO users (id, username, password, phone, avatar, cover, bio, location, wenshu_coin, is_vip, vip_level, vip_exp, vip_expires_at, following_count, followers_count, likes_count, register_rank, is_signed_in_today, last_sign_in_date, consecutive_sign_days, created_at, joined_qq_group, is_admin, is_banned, ban_until, ban_reason)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+    INSERT INTO users (id, username, password, phone, avatar, cover, bio, location, wenshu_coin, is_vip, vip_level, vip_exp, vip_expires_at, following_count, followers_count, likes_count, register_rank, is_signed_in_today, last_sign_in_date, consecutive_sign_days, created_at, joined_qq_group, is_admin, is_banned, ban_until, ban_reason, display_name, parent_user_id, admin_activated)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
     ON CONFLICT (id) DO UPDATE SET
       username = EXCLUDED.username, password = EXCLUDED.password, phone = EXCLUDED.phone, avatar = EXCLUDED.avatar, cover = EXCLUDED.cover,
       bio = EXCLUDED.bio, location = EXCLUDED.location, wenshu_coin = EXCLUDED.wenshu_coin, is_vip = EXCLUDED.is_vip,
@@ -599,14 +615,16 @@ export async function pgSaveUser(user) {
       register_rank = EXCLUDED.register_rank, is_signed_in_today = EXCLUDED.is_signed_in_today,
       last_sign_in_date = EXCLUDED.last_sign_in_date, consecutive_sign_days = EXCLUDED.consecutive_sign_days,
       joined_qq_group = EXCLUDED.joined_qq_group, is_admin = EXCLUDED.is_admin, is_banned = EXCLUDED.is_banned,
-      ban_until = EXCLUDED.ban_until, ban_reason = EXCLUDED.ban_reason
+      ban_until = EXCLUDED.ban_until, ban_reason = EXCLUDED.ban_reason,
+      display_name = EXCLUDED.display_name, parent_user_id = EXCLUDED.parent_user_id, admin_activated = EXCLUDED.admin_activated
   `, [
     user.id, user.username, user.password, user.phone || null, user.avatar || null, user.cover || null, user.bio || '', user.location || '',
     user.wenshuCoin || 0, user.isVip || false, user.vipLevel || 0, user.vipExp || 0, user.vipExpiresAt || null,
     user.followingCount || 0, user.followersCount || 0, user.likesCount || 0, user.registerRank || 0,
     user.isSignedInToday || false, user.lastSignInDate || '', user.consecutiveSignDays || 0,
     user.createdAt || Date.now(), user.joinedQQGroup || false, user.isAdmin || false, user.isBanned || false,
-    user.banUntil || null, user.banReason || null
+    user.banUntil || null, user.banReason || null,
+    user.displayName || null, user.parentUserId || null, user.adminActivated || false
   ]);
 }
 
@@ -706,10 +724,10 @@ export async function pgGetNotifications() {
 
 export async function pgSaveNotification(notif) {
   await pool.query(`
-    INSERT INTO notifications (id, user_id, type, content, from_user_id, post_id, is_read, created_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-    ON CONFLICT (id) DO UPDATE SET is_read = EXCLUDED.is_read
-  `, [notif.id, notif.userId, notif.type, notif.content, notif.fromUserId, notif.postId, notif.isRead, notif.createdAt]);
+    INSERT INTO notifications (id, user_id, type, content, from_user_id, post_id, comment_id, is_read, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    ON CONFLICT (id) DO UPDATE SET is_read = EXCLUDED.is_read, comment_id = EXCLUDED.comment_id
+  `, [notif.id, notif.userId, notif.type, notif.content, notif.fromUserId, notif.postId, notif.commentId || null, notif.isRead, notif.createdAt]);
 }
 
 export async function pgGetConversations() {
@@ -998,6 +1016,7 @@ function rowToFile(row) {
     size: parseInt(row.size) || 0,
     storageType: row.storage_type || 'local',
     expiresAt: row.expires_at ? Math.floor(Number(row.expires_at)) : null,
+    deleteAt: row.delete_at ? Math.floor(Number(row.delete_at)) : null,
     isPermanent: row.is_permanent || false,
     downloadCount: row.download_count || 0,
     createdAt: Math.floor(Number(row.created_at) || Date.now()),
@@ -1018,13 +1037,13 @@ function rowToUrlPreview(row) {
 
 export async function pgSaveFile(file) {
   await pool.query(`
-    INSERT INTO files (id, uploader_id, post_id, original_name, stored_key, mime_type, size, storage_type, expires_at, is_permanent, download_count, created_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    INSERT INTO files (id, uploader_id, post_id, original_name, stored_key, mime_type, size, storage_type, expires_at, delete_at, is_permanent, download_count, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
     ON CONFLICT (id) DO UPDATE SET
-      post_id = EXCLUDED.post_id, download_count = EXCLUDED.download_count
+      post_id = EXCLUDED.post_id, download_count = EXCLUDED.download_count, delete_at = EXCLUDED.delete_at, expires_at = EXCLUDED.expires_at, is_permanent = EXCLUDED.is_permanent
   `, [file.id, file.uploaderId, file.postId || null, file.originalName, file.storedKey,
        file.mimeType || 'application/octet-stream', file.size || 0, file.storageType || 'local',
-       file.expiresAt || null, file.isPermanent || false, file.downloadCount || 0, file.createdAt || Date.now()]);
+       file.expiresAt || null, file.deleteAt || null, file.isPermanent || false, file.downloadCount || 0, file.createdAt || Date.now()]);
 }
 
 export async function pgGetFileById(id) {
@@ -1040,6 +1059,11 @@ export async function pgGetFilesByPost(postId) {
 
 export async function pgGetFilesByUploader(uploaderId) {
   const res = await pool.query('SELECT * FROM files WHERE uploader_id = $1 ORDER BY created_at DESC', [uploaderId]);
+  return res.rows.map(rowToFile);
+}
+
+export async function pgGetAllFiles() {
+  const res = await pool.query('SELECT * FROM files ORDER BY created_at DESC');
   return res.rows.map(rowToFile);
 }
 

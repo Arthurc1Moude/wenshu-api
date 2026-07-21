@@ -109,10 +109,54 @@ function getUserId(req) {
 function getUserPublic(user) {
   if (!user) return null;
   const { password, ...safe } = user;
-  if (safe.isBanned && safe.banUntil && safe.banUntil < Date.now()) {
-    return { ...safe, isBanned: false, banUntil: null, banReason: null };
+  let isVip = Boolean(safe.isVip) || false;
+  let vipLevel = Number(safe.vipLevel) || 0;
+  if (isVip && safe.vipExpiresAt) {
+    const expiresAt = Number(safe.vipExpiresAt);
+    const expireDate = new Date(expiresAt);
+    expireDate.setHours(23, 59, 59, 999);
+    if (Date.now() > expireDate.getTime()) {
+      isVip = false;
+      vipLevel = 0;
+    }
   }
-  return safe;
+  const normalized = {
+    ...safe,
+    id: String(safe.id || ''),
+    username: String(safe.username || ''),
+    phone: safe.phone ? String(safe.phone) : null,
+    avatar: safe.avatar ? String(safe.avatar) : null,
+    cover: safe.cover ? String(safe.cover) : null,
+    bio: safe.bio ? String(safe.bio) : null,
+    location: safe.location ? String(safe.location) : null,
+    wenshuCoin: Number(safe.wenshuCoin) || 0,
+    isVip,
+    isAdmin: Boolean(safe.isAdmin) || false,
+    isBanned: Boolean(safe.isBanned) || false,
+    banUntil: safe.banUntil ? Number(safe.banUntil) : null,
+    banReason: safe.banReason ? String(safe.banReason) : null,
+    vipLevel,
+    vipExp: Number(safe.vipExp) || 0,
+    vipExpiresAt: safe.vipExpiresAt ? Number(safe.vipExpiresAt) : null,
+    followingCount: Number(safe.followingCount) || 0,
+    followersCount: Number(safe.followersCount) || 0,
+    likesCount: Number(safe.likesCount) || 0,
+    isMutual: Boolean(safe.isMutual) || false,
+    isFollowing: Boolean(safe.isFollowing) || false,
+    registerRank: Number(safe.registerRank) || 0,
+    isSignedInToday: Boolean(safe.isSignedInToday) || false,
+    lastSignInDate: safe.lastSignInDate ? String(safe.lastSignInDate) : null,
+    consecutiveSignDays: Number(safe.consecutiveDays) || 0,
+    createdAt: Number(safe.createdAt) || Date.now(),
+    joinedQQGroup: Boolean(safe.joinedQQGroup) || false,
+    displayName: safe.displayName ? String(safe.displayName) : String(safe.username || ''),
+    parentUserId: safe.parentUserId ? String(safe.parentUserId) : null,
+    adminActivated: Boolean(safe.adminActivated) || false,
+  };
+  if (normalized.isBanned && normalized.banUntil && normalized.banUntil < Date.now()) {
+    return { ...normalized, isBanned: false, banUntil: null, banReason: null };
+  }
+  return normalized;
 }
 
 async function checkBanned(userId) {
@@ -131,6 +175,70 @@ async function checkBanned(userId) {
     return { banned: true, reason: user.banReason || '账号已被封禁' };
   }
   return null;
+}
+
+async function processVipExpiryForUser(user) {
+  if (!user) return user;
+  try {
+    if (!user.isVip || !user.vipExpiresAt) return user;
+    
+    const now = Date.now();
+    const expiresAt = Number(user.vipExpiresAt);
+    const DAY = 24 * 60 * 60 * 1000;
+    const daysLeft = Math.ceil((expiresAt - now) / DAY);
+    
+    const expireDate = new Date(expiresAt);
+    expireDate.setHours(23, 59, 59, 999);
+    const endOfDay = expireDate.getTime();
+    
+    if (now > endOfDay) {
+      user.isVip = false;
+      user.vipLevel = 0;
+      user.vipReminder3d = false;
+      user.vipReminder1d = false;
+      user.vipExpiredNotified = true;
+      await saveUser(user);
+      await safeNotify(user.id, 'vip', '您的文书会会员已到期，会员特权已失效。点击续费继续享受专属福利！', null, null, null, {
+        type: 'vip_expired',
+        action: 'renew_vip'
+      });
+      return user;
+    }
+    
+    if (daysLeft <= 3 && !user.vipReminder3d && daysLeft > 1) {
+      user.vipReminder3d = true;
+      await saveUser(user);
+      await safeNotify(user.id, 'vip', `您的文书会会员将在${daysLeft}天后到期，点击消息即可续费，会员特权不中断！`, null, null, null, {
+        type: 'vip_expiring_3d',
+        action: 'renew_vip',
+        daysLeft
+      });
+    } else if (daysLeft <= 1 && !user.vipReminder1d && daysLeft > 0) {
+      user.vipReminder1d = true;
+      await saveUser(user);
+      await safeNotify(user.id, 'vip', '您的文书会会员将在明天到期，请及时续费以免影响会员特权使用！', null, null, null, {
+        type: 'vip_expiring_1d',
+        action: 'renew_vip',
+        daysLeft: 1
+      });
+    }
+  } catch (e) {
+    console.warn('processVipExpiryForUser non-fatal error:', e.message);
+  }
+  return user;
+}
+
+async function processAllVipExpiry() {
+  try {
+    const users = await getUsers();
+    for (const user of users) {
+      if (user.isVip && user.vipExpiresAt) {
+        await processVipExpiryForUser(user);
+      }
+    }
+  } catch (e) {
+    console.error('VIP expiry check error:', e);
+  }
 }
 
 function generateJoinCode() {
@@ -223,27 +331,27 @@ function generateUsernameSuggestions(baseUsername, existingUsers, count = 5) {
 function decoratePost(post, currentUserId, users, likes, collects, tips) {
   const author = users.find(u => u.id === post.authorId);
   const postTips = tips ? tips.filter(t => t.postId === post.id) : [];
-  const coinCount = post.coinCount != null ? post.coinCount : postTips.reduce((sum, t) => sum + (t.amount || 0), 0);
-  const tippedBy = post.tippedBy || (tips ? tips.filter(t => t.postId === post.id).map(t => t.userId) : []);
-  const isTipped = currentUserId ? (tippedBy.includes(currentUserId) || (tips ? tips.some(t => t.postId === post.id && t.userId === currentUserId) : false)) : false;
+  const coinCount = Number(post.coinCount != null ? post.coinCount : postTips.reduce((sum, t) => sum + Number(t.amount || 0), 0)) || 0;
+  const tippedBy = post.tippedBy || (tips ? tips.filter(t => t.postId === post.id).map(t => t.fromUserId || t.userId) : []);
+  const isTipped = currentUserId ? (tippedBy.includes(currentUserId) || (tips ? tips.some(t => t.postId === post.id && (t.fromUserId || t.userId) === currentUserId) : false)) : false;
   return {
-    id: post.id,
-    authorId: post.authorId,
-    title: post.title || '',
-    content: post.content || '',
-    images: Array.isArray(post.images) ? post.images : [],
+    id: String(post.id || ''),
+    authorId: post.authorId ? String(post.authorId) : null,
+    title: String(post.title || ''),
+    content: String(post.content || ''),
+    images: Array.isArray(post.images) ? post.images.map(String) : [],
     videos: Array.isArray(post.videos) ? post.videos : [],
     files: Array.isArray(post.files) ? post.files : [],
-    tags: Array.isArray(post.tags) ? post.tags : [],
-    likeCount: post.likeCount || 0,
-    commentCount: post.commentCount || 0,
-    collectCount: post.collectCount || 0,
+    tags: Array.isArray(post.tags) ? post.tags.map(String) : [],
+    likeCount: Number(post.likeCount) || 0,
+    commentCount: Number(post.commentCount) || 0,
+    collectCount: Number(post.collectCount) || 0,
     urlPreviews: Array.isArray(post.urlPreviews) ? post.urlPreviews : [],
-    location: post.location || '',
-    isLongPost: post.isLongPost || false,
-    createdAt: post.createdAt || Date.now(),
+    location: String(post.location || ''),
+    isLongPost: Boolean(post.isLongPost) || false,
+    createdAt: Number(post.createdAt) || Date.now(),
     coinCount,
-    tippedBy: Array.isArray(tippedBy) ? tippedBy : [],
+    tippedBy: Array.isArray(tippedBy) ? tippedBy.map(String) : [],
     author: author ? getUserPublic(author) : null,
     isLiked: currentUserId ? likes.some(l => l.postId === post.id && l.userId === currentUserId) : false,
     isCollected: currentUserId ? collects.some(c => c.postId === post.id && c.userId === currentUserId) : false,
@@ -251,7 +359,16 @@ function decoratePost(post, currentUserId, users, likes, collects, tips) {
   };
 }
 
-async function createNotification(userId, type, content, fromUserId, postId) {
+async function safeNotify(...args) {
+  try {
+    return await createNotificationImpl(...args);
+  } catch (e) {
+    console.warn('Notification failed (non-fatal):', e.message);
+    return null;
+  }
+}
+
+async function createNotificationImpl(userId, type, content, fromUserId, postId, commentId, extraData = null) {
   const users = await getUsers();
   const fromUser = fromUserId ? users.find(u => u.id === fromUserId) : null;
   const notif = {
@@ -261,38 +378,53 @@ async function createNotification(userId, type, content, fromUserId, postId) {
     fromUserId: fromUserId || null,
     fromUser: fromUser ? { id: fromUser.id, username: fromUser.username, avatar: fromUser.avatar, isVip: fromUser.isVip, vipLevel: fromUser.vipLevel } : null,
     postId: postId || null,
+    commentId: commentId || null,
     content,
     isRead: false,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    extra: extraData
   };
   await addNotification(notif);
   return notif;
 }
 
+const createNotification = safeNotify;
+
 async function addCoins(userId, amount, reason) {
-  const users = await getUsers();
-  const user = users.find(u => u.id === userId);
-  if (!user) return null;
-  user.wenshuCoin = (user.wenshuCoin || 0) + amount;
-  await saveUser(user);
-  await createNotification(userId, 'system', `获得${amount}文书币：${reason}`, null, null);
-  return user;
+  try {
+    const users = await getUsers();
+    const user = users.find(u => u.id === userId);
+    if (!user) return null;
+    user.wenshuCoin = Number(user.wenshuCoin || 0) + amount;
+    await saveUser(user);
+    await safeNotify(userId, 'system', `获得${amount}文书币：${reason}`, null, null);
+    return user;
+  } catch (e) {
+    console.warn('addCoins failed (non-fatal):', e.message);
+    return null;
+  }
 }
 
 async function addVipExp(userId, amount) {
-  const users = await getUsers();
-  const user = users.find(u => u.id === userId);
-  if (!user || !user.isVip) return null;
-  user.vipExp = (user.vipExp || 0) + amount;
-  let nextLevelExp = user.vipLevel * 100;
-  while (user.vipExp >= nextLevelExp && user.vipLevel < 100) {
-    user.vipLevel += 1;
-    user.vipExp -= nextLevelExp;
-    nextLevelExp = user.vipLevel * 100;
-    await createNotification(userId, 'system', `恭喜！文书会等级提升至 Lv${user.vipLevel}！`, null, null);
+  try {
+    const users = await getUsers();
+    const user = users.find(u => u.id === userId);
+    if (!user || !user.isVip) return null;
+    user.vipExp = Number(user.vipExp || 0) + Number(amount);
+    user.vipLevel = Number(user.vipLevel || 1);
+    let nextLevelExp = user.vipLevel * 100;
+    while (user.vipExp >= nextLevelExp && user.vipLevel < 100) {
+      user.vipLevel = Number(user.vipLevel) + 1;
+      user.vipExp = Number(user.vipExp) - nextLevelExp;
+      nextLevelExp = user.vipLevel * 100;
+      await safeNotify(userId, 'system', `恭喜！文书会等级提升至 Lv${user.vipLevel}！`, null, null);
+    }
+    await saveUser(user);
+    return user;
+  } catch (e) {
+    console.warn('addVipExp failed (non-fatal):', e.message);
+    return null;
   }
-  await saveUser(user);
-  return user;
 }
 
 async function createWelcomeConversation(userId) {
@@ -455,12 +587,14 @@ app.get('/api/users/me', async (req, res) => {
     const userId = getUserId(req);
     if (!userId) return res.status(401).json({ error: '未登录' });
     const users = await getUsers();
-    const user = users.find(u => u.id === userId);
+    let user = users.find(u => u.id === userId);
     if (!user) return res.status(401).json({ error: '用户不存在' });
+
+    await processVipExpiryForUser(user);
+    user = users.find(u => u.id === userId);
 
     const today = getTodayStr();
     user.isSignedInToday = (user.lastSignInDate === today);
-    await saveUser(user);
 
     res.json(getUserPublic(user));
   } catch (e) {
@@ -477,7 +611,29 @@ app.put('/api/users/me', async (req, res) => {
     const idx = users.findIndex(u => u.id === userId);
     if (idx === -1) return res.status(401).json({ error: '未登录' });
     const { username, bio, avatar, cover, location } = req.body;
-    if (username) users[idx].username = username;
+    if (username !== undefined && username !== null) {
+      let finalUsername = username;
+      if (users[idx].username.startsWith('admin_')) {
+        if (!username.startsWith('admin_')) {
+          finalUsername = 'admin_' + username;
+        }
+        const suffix = finalUsername.replace(/^admin_/, '');
+        if (!suffix || suffix.length < 3) {
+          return res.status(400).json({ error: '用户名长度至少3位（不含admin_前缀）' });
+        }
+        if (users.find(u => u.username === finalUsername && u.id !== userId)) {
+          return res.status(400).json({ error: '用户名已存在' });
+        }
+      } else {
+        if (username.length < 3) {
+          return res.status(400).json({ error: '用户名长度至少3位' });
+        }
+        if (users.find(u => u.username === username && u.id !== userId)) {
+          return res.status(400).json({ error: '用户名已存在' });
+        }
+      }
+      users[idx].username = finalUsername;
+    }
     if (bio !== undefined) users[idx].bio = bio;
     if (avatar) users[idx].avatar = avatar;
     if (cover) users[idx].cover = cover;
@@ -569,19 +725,22 @@ app.post('/api/coin/signin', async (req, res) => {
         coinsReward = 50;
         vipDays = 7;
         rewardDesc = '50文书币 + 7天免费VIP体验';
-        if (user.isVip) {
-          user.vipExpiresAt = (user.vipExpiresAt || Date.now()) + vipDays * 86400000;
+        if (user.isVip && user.vipExpiresAt && user.vipExpiresAt > Date.now()) {
+          user.vipExpiresAt = Number(user.vipExpiresAt) + vipDays * 86400000;
         } else {
           user.isVip = true;
           user.vipLevel = 1;
           user.vipExp = 0;
           user.vipExpiresAt = Date.now() + vipDays * 86400000;
         }
+        user.vipReminder3d = false;
+        user.vipReminder1d = false;
+        user.vipExpiredNotified = false;
         user.consecutiveSignDays = 0;
         break;
     }
 
-    user.wenshuCoin = (user.wenshuCoin || 0) + coinsReward;
+    user.wenshuCoin = Number(user.wenshuCoin || 0) + coinsReward;
     user.lastSignInDate = today;
     user.isSignedInToday = true;
     await saveUser(user);
@@ -614,7 +773,7 @@ app.post('/api/coin/join-qq', async (req, res) => {
     if (!user) return res.status(401).json({ error: '未登录' });
     if (user.joinedQQGroup) return res.status(400).json({ error: '已领取过QQ群奖励' });
     user.joinedQQGroup = true;
-    user.wenshuCoin += 200;
+    user.wenshuCoin = Number(user.wenshuCoin || 0) + 200;
     await saveUser(user);
     await createNotification(user.id, 'system', '加入QQ群奖励：获得200文书币！QQ群号：702404026', null, null);
     res.json({ coins: 200, totalCoins: user.wenshuCoin });
@@ -632,16 +791,33 @@ app.post('/api/vip/purchase', async (req, res) => {
     const users = await getUsers();
     const user = users.find(u => u.id === userId);
     if (!user) return res.status(401).json({ error: '未登录' });
-    if (user.isVip) return res.status(400).json({ error: '已是文书会会员' });
-
+    
+    await processVipExpiryForUser(user);
+    
+    const plan = String(req.body?.plan || 'yearly');
+    const vipDays = plan === 'monthly' ? 30 : 365;
+    const bonusCoins = 500;
+    const now = Date.now();
+    
+    const expireDate = (user.isVip && user.vipExpiresAt && user.vipExpiresAt > now)
+      ? new Date(Number(user.vipExpiresAt))
+      : new Date(now);
+    
     user.isVip = true;
     user.vipLevel = 1;
-    user.vipExp = 0;
-    user.vipExpiresAt = Date.now() + 365 * 24 * 3600 * 1000;
-    user.wenshuCoin += 500;
+    user.vipExpiresAt = expireDate.getTime() + vipDays * 24 * 3600 * 1000;
+    user.vipReminder3d = false;
+    user.vipReminder1d = false;
+    user.vipExpiredNotified = false;
+    user.wenshuCoin = Number(user.wenshuCoin || 0) + bonusCoins;
     await saveUser(user);
-
-    await createNotification(user.id, 'vip', '欢迎加入文书会！获得500文书币开通奖励，开始享受会员特权吧！', null, null);
+    
+    const isRenewal = user.vipExpiresAt > now + vipDays * 24 * 3600 * 1000 + 1000;
+    if (isRenewal) {
+      await createNotification(user.id, 'vip', `续费成功！会员已延长至${new Date(user.vipExpiresAt).toLocaleDateString('zh-CN')}，继续享受会员特权！`, null, null);
+    } else {
+      await createNotification(user.id, 'vip', '欢迎加入文书会！获得500文书币开通奖励，开始享受会员特权吧！', null, null);
+    }
     res.json({ user: getUserPublic(user) });
   } catch (e) {
     console.error('VIP purchase error:', e);
@@ -692,7 +868,7 @@ app.post('/api/redeem', async (req, res) => {
       });
       await createNotification(user.id, 'vip', '🎉 兑换成功！文书会VIP已激活，开始享受会员特权吧！', null, null);
     } else {
-      user.wenshuCoin += redeemCode.coinValue;
+      user.wenshuCoin = Number(user.wenshuCoin || 0) + Number(redeemCode.coinValue);
       responseData.coins = redeemCode.coinValue;
       responseData.totalCoins = user.wenshuCoin;
       await addRedeemRecord({
@@ -759,7 +935,7 @@ app.get('/api/posts', async (req, res) => {
         for (const fref of p.files) {
           if (typeof fref === 'string') {
             const f = await dbGetFileById(fref);
-            if (f) fileDetails.push({ id: f.id, filename: f.originalName, size: f.size, mimeType: f.mimeType, url: getFileUrl(f.storedKey, f.storageType), expiresAt: f.expiresAt, isPermanent: f.isPermanent });
+            if (f) fileDetails.push(decorateFile(f));
           } else if (fref.id) {
             fileDetails.push(fref);
           }
@@ -793,7 +969,7 @@ app.get('/api/posts/:id', async (req, res) => {
       for (const fref of post.files) {
         if (typeof fref === 'string') {
           const f = await dbGetFileById(fref);
-          if (f) fileDetails.push({ id: f.id, filename: f.originalName, size: f.size, mimeType: f.mimeType, url: getFileUrl(f.storedKey, f.storageType), expiresAt: f.expiresAt, isPermanent: f.isPermanent });
+          if (f) fileDetails.push(decorateFile(f));
         } else if (fref.id) {
           fileDetails.push(fref);
         }
@@ -976,21 +1152,21 @@ app.post('/api/posts/:id/tip', async (req, res) => {
       return res.status(400).json({ error: '文书币不足', code: 'INSUFFICIENT_COINS' });
     }
 
-    me.wenshuCoin = (me.wenshuCoin || 0) - amount;
+    me.wenshuCoin = Number(me.wenshuCoin || 0) - amount;
     await saveUser(me);
 
     const author = users.find(u => u.id === post.authorId);
     if (author) {
-      author.wenshuCoin = (author.wenshuCoin || 0) + amount;
+      author.wenshuCoin = Number(author.wenshuCoin || 0) + amount;
       await saveUser(author);
     }
 
-    post.coinCount = (post.coinCount || 0) + amount;
+    post.coinCount = Number(post.coinCount || 0) + amount;
     if (!post.tippedBy) post.tippedBy = [];
     if (!post.tippedBy.includes(userId)) post.tippedBy.push(userId);
     await savePost(post);
 
-    addTip({ id: genId('tip'), postId: post.id, userId, amount, createdAt: Date.now() });
+    await addTip({ id: genId('tip'), fromUserId: userId, postId: post.id, toUserId: post.authorId, amount, createdAt: Date.now() });
 
     if (author && post.authorId !== userId) {
       await createNotification(post.authorId, 'tip', `向你的帖子投入了${amount}文书币`, userId, post.id);
@@ -1126,11 +1302,15 @@ app.post('/api/posts/:id/comments', async (req, res) => {
 
     await addVipExp(userId, 5);
 
-    if (post.authorId !== userId) {
-      const replyToUser = replyToId ? users.find(u => u.id === replyToId) : null;
-      const notifContent = replyToUser ? `回复了你的评论：${content.slice(0, 20)}` : `评论了你的帖子：${content.slice(0, 20)}`;
-      const notifyUserId = replyToId || post.authorId;
-      await createNotification(notifyUserId, 'comment', notifContent, userId, post.id);
+    if (replyToId) {
+      const replyToUser = users.find(u => u.id === replyToId);
+      if (replyToUser && replyToId !== userId) {
+        await createNotification(replyToId, 'reply', `回复了你的评论：${content.slice(0, 20)}`, userId, post.id, comment.id);
+      }
+    } else {
+      if (post.authorId !== userId) {
+        await createNotification(post.authorId, 'comment', `评论了你的帖子：${content.slice(0, 20)}`, userId, post.id, comment.id);
+      }
     }
 
     const replyToUser = replyToId ? users.find(u => u.id === replyToId) : null;
@@ -1165,7 +1345,7 @@ app.post('/api/comments/:id/like', async (req, res) => {
       comment.likeCount = (comment.likeCount || 0) + 1;
       isLiked = true;
       if (comment.authorId !== userId) {
-        await createNotification(comment.authorId, 'comment_like', '赞了你的评论', userId, comment.postId);
+        await createNotification(comment.authorId, 'comment_like', '赞了你的评论', userId, comment.postId, comment.id);
       }
       await addVipExp(userId, 1);
     }
@@ -1231,8 +1411,22 @@ app.get('/api/notifications', async (req, res) => {
   try {
     const userId = getUserId(req);
     if (!userId) return res.json({ notifications: [], unreadCount: 0 });
-    const notifications = await getNotifications();
-    const userNotifs = notifications.filter(n => n.userId === userId).sort((a, b) => b.createdAt - a.createdAt);
+    let notifications = await getNotifications();
+    const users = await getUsers();
+    let userNotifs = notifications.filter(n => n.userId === userId).sort((a, b) => b.createdAt - a.createdAt);
+    userNotifs = userNotifs.map(n => {
+      const fromUser = n.fromUserId ? users.find(u => u.id === n.fromUserId) : null;
+      return {
+        ...n,
+        fromUser: fromUser ? {
+          id: fromUser.id,
+          username: fromUser.username,
+          avatar: fromUser.avatar,
+          isVip: fromUser.isVip,
+          vipLevel: fromUser.vipLevel
+        } : (n.fromUser || null)
+      };
+    });
     const unreadCount = userNotifs.filter(n => !n.isRead).length;
     res.json({ notifications: userNotifs, unreadCount });
   } catch (e) {
@@ -1342,6 +1536,34 @@ app.post('/api/conversations/:id/messages', async (req, res) => {
     conv.lastMessage = content.trim();
     conv.lastMessageTime = Date.now();
     await saveConversation(conv);
+
+    const senderName = sender?.displayName || sender?.username || '用户';
+    if (conv.type === 'private') {
+      const recipientId = conv.participantIds.find(id => id !== userId);
+      if (recipientId) {
+        await createNotification(recipientId, 'chat', content.trim(), userId, null, null, {
+          conversationId: conv.id,
+          senderName: senderName,
+          senderAvatar: sender?.avatar,
+          messageType: 'private'
+        });
+      }
+    } else if (conv.type === 'group') {
+      const groupName = conv.name || '群聊';
+      for (const pid of conv.participantIds) {
+        if (pid !== userId) {
+          await createNotification(pid, 'chat', `${senderName}: ${content.trim()}`, userId, null, null, {
+            conversationId: conv.id,
+            groupName: groupName,
+            groupAvatar: conv.avatar,
+            senderName: senderName,
+            senderAvatar: sender?.avatar,
+            messageType: 'group'
+          });
+        }
+      }
+    }
+
     res.json({
       ...msg,
       senderName: sender?.username,
@@ -1637,14 +1859,28 @@ app.post('/api/auth/change-password', async (req, res) => {
     const userId = getUserId(req);
     if (!userId) return res.status(401).json({ error: '未登录' });
     
-    const { oldPassword, newPassword, confirmPassword, phone, code } = req.body;
+    const { oldPassword, newPassword, confirmPassword } = req.body;
     
     const users = await getUsers();
     const me = users.find(u => u.id === userId);
     if (!me) return res.status(401).json({ error: '用户不存在' });
     
+    if (!me.phone || me.phone.length === 0) {
+      return res.status(400).json({ error: '必须先绑定手机号码', code: 'PHONE_REQUIRED' });
+    }
+    
+    if (!oldPassword) {
+      return res.status(400).json({ error: '请输入原密码' });
+    }
+    if (me.password !== oldPassword) {
+      return res.status(400).json({ error: '原密码错误' });
+    }
+    
     if (!newPassword || !confirmPassword) {
       return res.status(400).json({ error: '请输入新密码并确认' });
+    }
+    if (newPassword === oldPassword) {
+      return res.status(400).json({ error: '新密码不能与原密码相同' });
     }
     if (newPassword !== confirmPassword) {
       return res.status(400).json({ error: '两次密码输入不一致' });
@@ -1653,27 +1889,6 @@ app.post('/api/auth/change-password', async (req, res) => {
     const pwdValidation = validatePassword(newPassword);
     if (!pwdValidation.valid) {
       return res.status(400).json({ error: pwdValidation.message });
-    }
-    
-    if (me.phone) {
-      if (!phone || !code) {
-        return res.status(400).json({ error: '请输入手机号和验证码' });
-      }
-      if (phone !== me.phone) {
-        return res.status(400).json({ error: '请输入绑定的手机号' });
-      }
-      const vc = await findValidVerificationCode(phone, code, 'change_password');
-      if (!vc) {
-        return res.status(400).json({ error: '验证码错误或已过期' });
-      }
-      await markVerificationCodeUsed(vc.id);
-    } else {
-      if (!oldPassword) {
-        return res.status(400).json({ error: '请输入原密码' });
-      }
-      if (me.password !== oldPassword) {
-        return res.status(400).json({ error: '原密码错误' });
-      }
     }
     
     me.password = newPassword;
@@ -1689,61 +1904,271 @@ app.post('/api/auth/change-password', async (req, res) => {
 // ========== SEARCH ==========
 app.get('/api/search', async (req, res) => {
   try {
-    const { q } = req.query;
+    const { q, type } = req.query;
     const currentUserId = getUserId(req);
-    if (!q || !q.trim()) return res.json({ posts: [], users: [] });
+    if (!q || !q.trim()) return res.json({ posts: [], users: [], tags: [], comments: [] });
     const query = q.trim();
-    const queryLower = query.toLowerCase();
-    const keywords = queryLower.split(/\s+/).filter(k => k.length > 0);
+    const queryLower = String(query).toLowerCase();
 
-    function textMatches(text) {
-      if (!text) return false;
-      const t = text.toLowerCase();
-      if (keywords.length === 0) return t.includes(queryLower);
-      return keywords.every(kw => t.includes(kw));
+    const keywords = [];
+    let hashTagQuery = null;
+    let usernameQuery = null;
+
+    if (query.startsWith('#')) {
+      hashTagQuery = query.substring(1).toLowerCase().trim();
+    } else if (query.startsWith('@')) {
+      usernameQuery = query.substring(1).toLowerCase().trim();
     }
 
-    const posts = await getPosts();
-    const users = await getUsers();
-    const likes = await getLikes();
-    const collects = await getCollects();
-    const comments = await getComments();
+    const segments = queryLower.split(/[\s,，。.!！?？；;、#@"'""''（）()\[\]【】]+/).filter(k => k && k.length >= 1);
+    for (const seg of segments) {
+      if (seg && seg.length >= 1) keywords.push(seg);
+    }
+    if (queryLower.length >= 1 && keywords.length === 0) keywords.push(queryLower);
+
+    function safeString(val) {
+      if (val === null || val === undefined) return '';
+      return String(val).toLowerCase();
+    }
+
+    function textMatches(text) {
+      if (text === null || text === undefined) return false;
+      const t = safeString(text);
+      if (!t) return false;
+      if (t.includes(queryLower)) return true;
+      for (const kw of keywords) {
+        if (kw && kw.length >= 1 && t.includes(kw)) return true;
+      }
+      return false;
+    }
+
+    let posts = [], users = [];
+    let likes = [], collects = [], comments = [], tips = [];
+    try { posts = (await getPosts()) || []; } catch(e) { console.error('getPosts error in search:', e); posts = []; }
+    try { users = (await getUsers()) || []; } catch(e) { console.error('getUsers error in search:', e); users = []; }
+    try { likes = (await getLikes()) || []; } catch(e) { likes = []; }
+    try { collects = (await getCollects()) || []; } catch(e) { collects = []; }
+    try { comments = (await getComments()) || []; } catch(e) { comments = []; }
+    try { tips = (await getTips()) || []; } catch(e) { tips = []; }
+
+    if (!Array.isArray(posts)) posts = [];
+    if (!Array.isArray(users)) users = [];
+    if (!Array.isArray(likes)) likes = [];
+    if (!Array.isArray(collects)) collects = [];
+    if (!Array.isArray(comments)) comments = [];
+    if (!Array.isArray(tips)) tips = [];
 
     const postIdsWithComments = new Set();
+    const matchedComments = [];
     for (const c of comments) {
-      if (textMatches(c.content)) {
-        postIdsWithComments.add(c.postId);
+      try {
+        if (!c) continue;
+        if (textMatches(c.content)) {
+          postIdsWithComments.add(c.postId);
+          const commentAuthorId = c.authorId || c.userId;
+          const commentAuthor = commentAuthorId ? users.find(u => u && u.id === commentAuthorId) : null;
+          const post = posts.find(p => p && p.id === c.postId);
+          const postAuthorId = post ? post.authorId : null;
+          const postAuthorUser = postAuthorId ? users.find(u => u && u.id === postAuthorId) : null;
+          matchedComments.push({
+            id: String(c.id || ''),
+            content: String(c.content || ''),
+            postId: String(c.postId || ''),
+            postTitle: post ? String(post.title || '') : '',
+            postAuthor: postAuthorUser ? String(postAuthorUser.username || '') : '',
+            author: commentAuthor ? {
+              id: String(commentAuthor.id || ''),
+              username: String(commentAuthor.username || ''),
+              avatar: commentAuthor.avatar ? String(commentAuthor.avatar) : null
+            } : null,
+            createdAt: Number(c.createdAt) || Date.now()
+          });
+        }
+      } catch(e) {
+        console.error('Error processing comment in search:', e);
       }
     }
 
-    const matchedPosts = posts.filter(p => {
-      if (textMatches(p.content)) return true;
-      if (p.tags && p.tags.some(t => textMatches(t) || textMatches('#' + t))) return true;
-      if (postIdsWithComments.has(p.id)) return true;
-      return false;
-    }).slice(0, 50);
+    const tagCountMap = {};
+    for (const p of posts) {
+      try {
+        if (!p) continue;
+        if (p.tags && Array.isArray(p.tags)) {
+          for (const t of p.tags) {
+            if (t === null || t === undefined) continue;
+            const tagStr = String(t);
+            if (!tagStr) continue;
+            const tagLower = tagStr.toLowerCase();
+            const matches = hashTagQuery
+              ? tagLower.includes(hashTagQuery)
+              : textMatches(tagStr);
+            if (matches) {
+              tagCountMap[tagStr] = (tagCountMap[tagStr] || 0) + 1;
+            }
+          }
+        }
+      } catch(e) {
+        console.error('Error processing post tags in search:', e);
+      }
+    }
+    const matchedTags = Object.entries(tagCountMap)
+      .map(([tag, count]) => ({ tag: String(tag), count: Number(count) || 0 }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 20);
 
-    const matchedUsers = users.filter(u => {
-      if (textMatches(u.username)) return true;
-      if (textMatches(u.bio)) return true;
-      return false;
-    }).slice(0, 30).map(u => getUserPublic(u));
+    const filterType = type || 'all';
 
-    const postsWithAuthor = matchedPosts.map(p => decoratePost(p, currentUserId, users, likes, collects, getTips()));
-    res.json({ posts: postsWithAuthor, users: matchedUsers });
+    let matchedPosts = [];
+    if (filterType === 'all' || filterType === 'posts') {
+      for (const p of posts) {
+        try {
+          if (!p) continue;
+          let matches = false;
+          if (textMatches(p.content) || textMatches(p.title)) matches = true;
+          if (!matches && p.tags && Array.isArray(p.tags)) {
+            for (const t of p.tags) {
+              if (t === null || t === undefined) continue;
+              const tagStr = String(t);
+              const tagLower = tagStr.toLowerCase();
+              if (hashTagQuery ? tagLower.includes(hashTagQuery) : textMatches(tagStr)) {
+                matches = true;
+                break;
+              }
+            }
+          }
+          if (!matches && postIdsWithComments.has(p.id)) matches = true;
+          if (!matches && p.authorId) {
+            const author = users.find(u => u && u.id === p.authorId);
+            if (author) {
+              if (usernameQuery) {
+                if (safeString(author.username).includes(usernameQuery)) matches = true;
+              } else {
+                if (textMatches(author.username) || textMatches(author.bio || '')) matches = true;
+              }
+            }
+          }
+          if (matches) matchedPosts.push(p);
+        } catch(e) {
+          console.error('Error processing post in search:', e);
+        }
+        if (matchedPosts.length >= 50) break;
+      }
+    }
+
+    let matchedUsers = [];
+    if (filterType === 'all' || filterType === 'users') {
+      for (const u of users) {
+        try {
+          if (!u) continue;
+          const uname = safeString(u.username);
+          let matches = false;
+          if (usernameQuery) {
+            matches = uname.includes(usernameQuery);
+          } else {
+            matches = textMatches(u.username) || textMatches(u.bio || '');
+          }
+          if (matches) {
+            matchedUsers.push(getUserPublic(u));
+          }
+        } catch(e) {
+          console.error('Error processing user in search:', e);
+        }
+        if (matchedUsers.length >= 30) break;
+      }
+    }
+
+    const postsWithAuthor = [];
+    for (const p of matchedPosts) {
+      try {
+        postsWithAuthor.push(decoratePost(p, currentUserId, users, likes, collects, tips));
+      } catch(e) {
+        try {
+          postsWithAuthor.push(decoratePost(p, currentUserId, users, [], [], []));
+        } catch(e2) {
+          console.error('Failed to decorate post in search:', e2);
+        }
+      }
+    }
+
+    res.json({
+      posts: postsWithAuthor,
+      users: matchedUsers,
+      tags: matchedTags,
+      comments: matchedComments.slice(0, 30)
+    });
   } catch (e) {
     console.error('Search error:', e);
-    res.status(500).json({ error: '服务器错误', posts: [], users: [] });
+    res.status(500).json({ error: '服务器错误', posts: [], users: [], tags: [], comments: [] });
   }
 });
 
 // ========== UPLOAD ==========
 function getUserUploadLimit(user) {
-  if (!user) return { maxSize: 100 * 1024 * 1024, isPermanent: false };
-  if (user.isAdmin) return { maxSize: Infinity, isPermanent: true };
-  if (user.isVip && user.vipLevel >= 2) return { maxSize: 20 * 1024 * 1024 * 1024, isPermanent: true };
-  if (user.isVip && user.vipLevel >= 1) return { maxSize: 16 * 1024 * 1024 * 1024, isPermanent: false };
-  return { maxSize: 1 * 1024 * 1024 * 1024, isPermanent: false };
+  if (!user) return { maxSize: 100 * 1024 * 1024, isPermanent: false, expireDays: 7 };
+  if (user.isAdmin) return { maxSize: Infinity, isPermanent: true, expireDays: null };
+  if (user.isVip && user.vipLevel >= 2) return { maxSize: 20 * 1024 * 1024 * 1024, isPermanent: true, expireDays: null };
+  if (user.isVip && user.vipLevel >= 1) return { maxSize: 16 * 1024 * 1024 * 1024, isPermanent: false, expireDays: 30 };
+  return { maxSize: 1 * 1024 * 1024 * 1024, isPermanent: false, expireDays: 7 };
+}
+
+function calculateFileExpiry(mimeType, user) {
+  const isMedia = mimeType && (mimeType.startsWith('image/') || mimeType.startsWith('video/'));
+  if (isMedia) {
+    return { isPermanent: true, expireDays: null, expiresAt: null, deleteAt: null };
+  }
+  const limit = getUserUploadLimit(user);
+  if (limit.isPermanent) {
+    return { isPermanent: true, expireDays: null, expiresAt: null, deleteAt: null };
+  }
+  const now = Date.now();
+  const expiresAt = now + limit.expireDays * 24 * 60 * 60 * 1000;
+  const expireDate = new Date(expiresAt);
+  expireDate.setHours(23, 59, 59, 999);
+  const deleteAt = expireDate.getTime();
+  return { isPermanent: false, expireDays: limit.expireDays, expiresAt, deleteAt };
+}
+
+function getFileExpiryStatus(file) {
+  if (file.isPermanent) {
+    return { expiryStatus: 'permanent', expiresAtText: '永久有效' };
+  }
+  const now = Date.now();
+  if (file.deleteAt && now > file.deleteAt) {
+    return { expiryStatus: 'deleted', expiresAtText: '已删除' };
+  }
+  if (file.expiresAt && now >= file.expiresAt) {
+    return { expiryStatus: 'expired', expiresAtText: '已过期' };
+  }
+  if (file.expiresAt) {
+    const msUntilExpiry = file.expiresAt - now;
+    const daysLeft = Math.ceil(msUntilExpiry / (24 * 60 * 60 * 1000));
+    if (daysLeft <= 3) {
+      let text;
+      if (daysLeft <= 0) text = '即将过期';
+      else if (daysLeft === 1) text = '1天后过期';
+      else text = `${daysLeft}天后过期`;
+      return { expiryStatus: 'expiring_soon', daysLeft, expiresAtText: text };
+    }
+    const expireDate = new Date(file.expiresAt);
+    const text = `${expireDate.getFullYear()}-${String(expireDate.getMonth() + 1).padStart(2, '0')}-${String(expireDate.getDate()).padStart(2, '0')}过期`;
+    return { expiryStatus: 'active', daysLeft, expiresAtText: text };
+  }
+  return { expiryStatus: 'active', expiresAtText: '' };
+}
+
+function decorateFile(f) {
+  const status = getFileExpiryStatus(f);
+  return {
+    id: f.id,
+    filename: f.originalName,
+    size: f.size,
+    mimeType: f.mimeType,
+    url: getFileUrl(f.storedKey, f.storageType),
+    expiresAt: f.expiresAt,
+    deleteAt: f.deleteAt,
+    isPermanent: f.isPermanent,
+    ...status
+  };
 }
 
 function formatSize(bytes) {
@@ -1762,7 +2187,7 @@ app.post('/api/upload', uploadMemory.any(), async (req, res) => {
 
     const users = await getUsers();
     const user = users.find(u => u.id === userId);
-    const { maxSize, isPermanent } = getUserUploadLimit(user);
+    const { maxSize } = getUserUploadLimit(user);
 
     if (uploadedFile.size > maxSize) {
       let msg = '仅会员可上传超出1GB的文件';
@@ -1777,7 +2202,7 @@ app.post('/api/upload', uploadMemory.any(), async (req, res) => {
     }
 
     const result = await uploadFile(uploadedFile.buffer, uploadedFile.originalname, uploadedFile.mimetype);
-    const expiresAt = isPermanent ? null : Date.now() + 14 * 24 * 60 * 60 * 1000;
+    const expiry = calculateFileExpiry(uploadedFile.mimetype, user);
 
     const fileRecord = {
       id: genId('file'),
@@ -1787,22 +2212,28 @@ app.post('/api/upload', uploadMemory.any(), async (req, res) => {
       mimeType: uploadedFile.mimetype || 'application/octet-stream',
       size: uploadedFile.size,
       storageType: result.storageType,
-      expiresAt,
-      isPermanent,
+      expiresAt: expiry.expiresAt,
+      deleteAt: expiry.deleteAt,
+      isPermanent: expiry.isPermanent,
       downloadCount: 0,
       createdAt: Date.now(),
     };
     await dbSaveFile(fileRecord);
 
     const url = getFileUrl(result.key, result.storageType);
+    const decorated = decorateFile(fileRecord);
     res.json({
       id: fileRecord.id,
       url,
       filename: uploadedFile.originalname,
       size: uploadedFile.size,
       mimeType: fileRecord.mimeType,
-      expiresAt,
-      isPermanent,
+      expiresAt: expiry.expiresAt,
+      deleteAt: expiry.deleteAt,
+      isPermanent: expiry.isPermanent,
+      expiryStatus: decorated.expiryStatus,
+      expiresAtText: decorated.expiresAtText,
+      daysLeft: decorated.daysLeft,
     });
   } catch (e) {
     console.error('Upload error:', e);
@@ -1833,8 +2264,7 @@ app.post('/api/upload/image', uploadMemory.single('file'), async (req, res) => {
     }
 
     const result = await uploadFile(req.file.buffer, req.file.originalname, req.file.mimetype);
-    const { isPermanent } = getUserUploadLimit(user);
-    const expiresAt = isPermanent ? null : Date.now() + 14 * 24 * 60 * 60 * 1000;
+    const expiry = calculateFileExpiry(req.file.mimetype, user);
 
     const fileRecord = {
       id: genId('file'),
@@ -1844,22 +2274,28 @@ app.post('/api/upload/image', uploadMemory.single('file'), async (req, res) => {
       mimeType: req.file.mimetype || 'application/octet-stream',
       size: req.file.size,
       storageType: result.storageType,
-      expiresAt,
-      isPermanent,
+      expiresAt: expiry.expiresAt,
+      deleteAt: expiry.deleteAt,
+      isPermanent: expiry.isPermanent,
       downloadCount: 0,
       createdAt: Date.now(),
     };
     await dbSaveFile(fileRecord);
 
     const url = getFileUrl(result.key, result.storageType);
+    const decorated = decorateFile(fileRecord);
     res.json({
       id: fileRecord.id,
       url,
       filename: req.file.originalname,
       size: req.file.size,
       mimeType: fileRecord.mimeType,
-      expiresAt,
-      isPermanent,
+      expiresAt: expiry.expiresAt,
+      deleteAt: expiry.deleteAt,
+      isPermanent: expiry.isPermanent,
+      expiryStatus: decorated.expiryStatus,
+      expiresAtText: decorated.expiresAtText,
+      daysLeft: decorated.daysLeft,
     });
   } catch (e) {
     console.error('Upload error:', e);
@@ -1875,7 +2311,7 @@ app.post('/api/upload/file', uploadMemory.single('file'), async (req, res) => {
 
     const users = await getUsers();
     const user = users.find(u => u.id === userId);
-    const { maxSize, isPermanent: perm } = getUserUploadLimit(user);
+    const { maxSize } = getUserUploadLimit(user);
 
     if (req.file.size > maxSize) {
       let msg = '仅会员可上传超出1GB的文件';
@@ -1890,7 +2326,7 @@ app.post('/api/upload/file', uploadMemory.single('file'), async (req, res) => {
     }
 
     const result = await uploadFile(req.file.buffer, req.file.originalname, req.file.mimetype);
-    const expiresAt = perm ? null : Date.now() + 14 * 24 * 60 * 60 * 1000;
+    const expiry = calculateFileExpiry(req.file.mimetype, user);
 
     const fileRecord = {
       id: genId('file'),
@@ -1900,22 +2336,28 @@ app.post('/api/upload/file', uploadMemory.single('file'), async (req, res) => {
       mimeType: req.file.mimetype || 'application/octet-stream',
       size: req.file.size,
       storageType: result.storageType,
-      expiresAt,
-      isPermanent: perm,
+      expiresAt: expiry.expiresAt,
+      deleteAt: expiry.deleteAt,
+      isPermanent: expiry.isPermanent,
       downloadCount: 0,
       createdAt: Date.now(),
     };
     await dbSaveFile(fileRecord);
 
     const url = getFileUrl(result.key, result.storageType);
+    const decorated = decorateFile(fileRecord);
     res.json({
       id: fileRecord.id,
       url,
       filename: req.file.originalname,
       size: req.file.size,
       mimeType: fileRecord.mimeType,
-      expiresAt,
-      isPermanent: perm,
+      expiresAt: expiry.expiresAt,
+      deleteAt: expiry.deleteAt,
+      isPermanent: expiry.isPermanent,
+      expiryStatus: decorated.expiryStatus,
+      expiresAtText: decorated.expiresAtText,
+      daysLeft: decorated.daysLeft,
     });
   } catch (e) {
     console.error('File upload error:', e);
@@ -1927,17 +2369,13 @@ app.get('/api/files/:id', async (req, res) => {
   try {
     const file = await dbGetFileById(req.params.id);
     if (!file) return res.status(404).json({ error: '文件不存在或已过期' });
-    if (file.expiresAt && file.expiresAt < Date.now() && !file.isPermanent) {
-      return res.status(410).json({ error: '文件已过期' });
+    const now = Date.now();
+    if (!file.isPermanent && file.deleteAt && now > file.deleteAt) {
+      return res.status(410).json({ error: '文件已删除' });
     }
+    const decorated = decorateFile(file);
     res.json({
-      id: file.id,
-      filename: file.originalName,
-      size: file.size,
-      mimeType: file.mimeType,
-      url: getFileUrl(file.storedKey, file.storageType),
-      expiresAt: file.expiresAt,
-      isPermanent: file.isPermanent,
+      ...decorated,
       downloadCount: file.downloadCount,
       createdAt: file.createdAt,
     });
@@ -1950,8 +2388,9 @@ app.get('/api/files/:id/download', async (req, res) => {
   try {
     const file = await dbGetFileById(req.params.id);
     if (!file) return res.status(404).json({ error: '文件不存在或已过期' });
-    if (file.expiresAt && file.expiresAt < Date.now() && !file.isPermanent) {
-      return res.status(410).json({ error: '文件已过期' });
+    const now = Date.now();
+    if (!file.isPermanent && file.deleteAt && now > file.deleteAt) {
+      return res.status(410).json({ error: '文件已删除' });
     }
 
     await incrementFileDownload(file.id);
@@ -2088,7 +2527,7 @@ app.post('/api/admin/reward/:userId', async (req, res) => {
     if (!target) return res.status(404).json({ error: '用户不存在' });
     const parts = [];
     if (coins && coins > 0) {
-      target.wenshuCoin = (target.wenshuCoin || 0) + coins;
+      target.wenshuCoin = Number(target.wenshuCoin || 0) + coins;
       parts.push(`${coins}文书币`);
     }
     if (vipDays && vipDays > 0) {
@@ -2129,6 +2568,469 @@ app.get('/api/admin/users', async (req, res) => {
     res.json(list.slice(0, 100).map(u => getUserPublic(u)));
   } catch (e) {
     console.error('Admin list users error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.delete('/api/admin/posts/:postId', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const postId = req.params.postId;
+    const posts = await getPosts();
+    const postIndex = posts.findIndex(p => p.id === postId);
+    if (postIndex < 0) return res.status(404).json({ error: '帖子不存在' });
+    posts.splice(postIndex, 1);
+    await savePosts(posts);
+    res.json({ ok: true, message: '帖子已删除' });
+  } catch (e) {
+    console.error('Admin delete post error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/users', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const { username, password, displayName, isAdmin = false, isVip = false, vipDays = 0, wenshuCoin = 0 } = req.body;
+    if (!username || !password) return res.status(400).json({ error: '用户名和密码不能为空' });
+    const users = await getUsers();
+    if (users.find(u => u.username === username)) {
+      return res.status(400).json({ error: '用户名已存在' });
+    }
+    const pwCheck = validatePassword(password);
+    if (!pwCheck.valid) return res.status(400).json({ error: pwCheck.message });
+    const rank = await incrementRegisterCount();
+    const newUser = {
+      id: genId('user'),
+      username,
+      displayName: displayName || username,
+      password,
+      avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName || username)}&background=random&color=fff&size=200&bold=true`,
+      cover: null,
+      bio: '',
+      location: '',
+      phone: null,
+      wenshuCoin: wenshuCoin || 0,
+      isAdmin: !!isAdmin,
+      isVip: !!isVip,
+      vipLevel: isVip ? 1 : 0,
+      vipExp: 0,
+      vipExpiresAt: (isVip && vipDays > 0) ? Date.now() + vipDays * 86400000 : null,
+      followingCount: 0,
+      followersCount: 0,
+      likesCount: 0,
+      registerRank: rank,
+      isBanned: false,
+      banUntil: null,
+      banReason: null,
+      isSignedInToday: false,
+      lastSignInDate: null,
+      consecutiveSignDays: 0,
+      createdAt: Date.now(),
+      joinedQQGroup: false
+    };
+    await saveUser(newUser);
+    res.json(getUserPublic(newUser));
+  } catch (e) {
+    console.error('Admin create user error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.put('/api/admin/users/:userId', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const targetId = req.params.userId;
+    const users = await getUsers();
+    const target = users.find(u => u.id === targetId);
+    if (!target) return res.status(404).json({ error: '用户不存在' });
+    const { displayName, wenshuCoin, isVip, vipDays, isAdmin } = req.body;
+    if (displayName !== undefined) target.displayName = displayName;
+    if (wenshuCoin !== undefined) target.wenshuCoin = wenshuCoin;
+    if (isAdmin !== undefined) target.isAdmin = isAdmin;
+    if (isVip !== undefined) {
+      target.isVip = isVip;
+      if (isVip && !target.vipLevel) target.vipLevel = 1;
+    }
+    if (vipDays !== undefined && vipDays > 0) {
+      if (target.vipExpiresAt && target.vipExpiresAt > Date.now()) {
+        target.vipExpiresAt = target.vipExpiresAt + vipDays * 86400000;
+      } else {
+        target.isVip = true;
+        if (!target.vipLevel) target.vipLevel = 1;
+        target.vipExpiresAt = Date.now() + vipDays * 86400000;
+      }
+    }
+    await saveUser(target);
+    res.json(getUserPublic(target));
+  } catch (e) {
+    console.error('Admin update user error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/users/:userId/message', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const targetId = req.params.userId;
+    const { content, title } = req.body;
+    if (!content) return res.status(400).json({ error: '消息内容不能为空' });
+    const users = await getUsers();
+    const target = users.find(u => u.id === targetId);
+    if (!target) return res.status(404).json({ error: '用户不存在' });
+    await createNotification(targetId, 'system', content, null, null);
+    res.json({ ok: true, message: '消息已发送' });
+  } catch (e) {
+    console.error('Admin send message error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/broadcast', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const { content, title, targetType = 'all' } = req.body;
+    if (!content) return res.status(400).json({ error: '消息内容不能为空' });
+    const users = await getUsers();
+    let targets = users;
+    if (targetType === 'vip') {
+      targets = users.filter(u => u.isVip);
+    }
+    let sentCount = 0;
+    for (const user of targets) {
+      if (user.isAdmin) continue;
+      await createNotification(user.id, 'system', content, null, null);
+      sentCount++;
+    }
+    res.json({ ok: true, sentCount, message: `已向${sentCount}位用户发送广播` });
+  } catch (e) {
+    console.error('Admin broadcast error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/reward-all', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const { coins, vipDays, reason } = req.body;
+    const users = await getUsers();
+    const parts = [];
+    let rewardedCount = 0;
+    for (const user of users) {
+      if (user.isAdmin) continue;
+      if (coins && coins > 0) {
+        user.wenshuCoin = Number(user.wenshuCoin || 0) + coins;
+      }
+      if (vipDays && vipDays > 0) {
+        if (user.vipExpiresAt && user.vipExpiresAt > Date.now()) {
+          user.vipExpiresAt = user.vipExpiresAt + vipDays * 86400000;
+        } else {
+          user.isVip = true;
+          if (!user.vipLevel) user.vipLevel = 1;
+          user.vipExpiresAt = Date.now() + vipDays * 86400000;
+        }
+      }
+      await saveUser(user);
+      rewardedCount++;
+    }
+    if (coins && coins > 0) parts.push(`${coins}文书币`);
+    if (vipDays && vipDays > 0) parts.push(`${vipDays}天VIP`);
+    const rewardStr = parts.join('、');
+    if (rewardStr) {
+      for (const user of users) {
+        if (user.isAdmin) continue;
+        await createNotification(user.id, 'reward', `全员福利：获得${rewardStr}${reason ? '（' + reason + '）' : ''}`, null, null);
+      }
+    }
+    res.json({ ok: true, rewardedCount, message: `已向${rewardedCount}位用户发放奖励` });
+  } catch (e) {
+    console.error('Admin reward all error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/create-user', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    
+    const { username, password, displayName, isAdmin, isVip, vipDays, wenshuCoin } = req.body;
+    
+    if (!username || !password) {
+      return res.status(400).json({ error: '用户名和密码不能为空' });
+    }
+    if (username.length < 3) {
+      return res.status(400).json({ error: '用户名长度至少3位' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: '密码长度至少8位' });
+    }
+    if (!password.match(/[a-z]/) || !password.match(/[A-Z]/) || !password.match(/[0-9]/)) {
+      return res.status(400).json({ error: '密码需包含大小写字母和数字' });
+    }
+    if (password.match(/[\u4e00-\u9fa5]/)) {
+      return res.status(400).json({ error: '密码不能包含中文字符' });
+    }
+    
+    const users = await getUsers();
+    if (users.find(u => u.username === username)) {
+      return res.status(400).json({ error: '该用户名已被他人使用' });
+    }
+    
+    const rank = await incrementRegisterCount();
+    const vipExpiresAt = isVip && vipDays > 0 ? Date.now() + vipDays * 24 * 60 * 60 * 1000 : null;
+    
+    const newUser = {
+      id: genId('user'),
+      username: username,
+      displayName: displayName || username,
+      password: password,
+      avatar: '',
+      cover: '',
+      bio: '',
+      location: '',
+      wenshuCoin: wenshuCoin || 0,
+      isVip: isVip || false,
+      isAdmin: isAdmin || false,
+      isBanned: false,
+      banUntil: null,
+      banReason: null,
+      vipLevel: isVip ? 1 : 0,
+      vipExp: 0,
+      vipExpiresAt: vipExpiresAt,
+      followingCount: 0,
+      followersCount: 0,
+      likesCount: 0,
+      postsCount: 0,
+      registerRank: rank,
+      isSignedInToday: false,
+      lastSignInDate: null,
+      consecutiveSignDays: 0,
+      createdAt: Date.now(),
+      joinedQQGroup: false,
+      parentUserId: null,
+      adminActivated: false
+    };
+    await saveUser(newUser);
+    
+    await createNotification(newUser.id, 'system', 
+      '🎉 欢迎加入文书社区！你的账号已创建成功。', null, null, null, { type: 'welcome' });
+    
+    res.json({ ok: true, user: getUserPublic(newUser), message: '用户创建成功' });
+  } catch (e) {
+    console.error('Create user error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/promote/:userId', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const targetId = req.params.userId;
+    const users = await getUsers();
+    const target = users.find(u => u.id === targetId);
+    if (!target) return res.status(404).json({ error: '用户不存在' });
+    if (target.isAdmin) return res.status(400).json({ error: '该用户已经是管理员' });
+    
+    const adminUsername = 'admin_' + target.username;
+    const existingAdmin = users.find(u => u.username === adminUsername);
+    if (existingAdmin) return res.status(400).json({ error: '该用户的管理员账号已存在' });
+    
+    const rank = await incrementRegisterCount();
+    const newAdmin = {
+      id: genId('admin_sub'),
+      username: adminUsername,
+      displayName: '管理员_' + target.displayName,
+      password: target.password,
+      avatar: target.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent('管')}&background=000000&color=fff&size=200&bold=true`,
+      cover: target.cover,
+      bio: target.bio || '',
+      location: target.location || '',
+      phone: target.phone,
+      wenshuCoin: Number(target.wenshuCoin) || 0,
+      isAdmin: true,
+      isVip: true,
+      vipLevel: 99,
+      vipExp: 0,
+      vipExpiresAt: null,
+      followingCount: 0,
+      followersCount: 0,
+      likesCount: 0,
+      registerRank: rank,
+      isBanned: false,
+      banUntil: null,
+      banReason: null,
+      isSignedInToday: false,
+      lastSignInDate: null,
+      consecutiveSignDays: 0,
+      createdAt: Date.now(),
+      joinedQQGroup: false,
+      parentUserId: target.id,
+      adminActivated: false
+    };
+    await saveUser(newAdmin);
+    
+    await createNotification(targetId, 'system', 
+      '🎉 恭喜你被任命为管理员！你的管理员账号为：' + adminUsername + '，密码与原账号相同。点击此处登录管理员账号。',
+      null, null, null, { type: 'admin_promotion', adminUsername: adminUsername, password: target.password });
+    
+    res.json({ ok: true, adminUser: getUserPublic(newAdmin), message: '已成功提升用户为管理员' });
+  } catch (e) {
+    console.error('Promote admin error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/redeem/create', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const { code, rewardType, coinValue, vipDays, maxUses, validDays, description } = req.body;
+    
+    if (!code || !code.trim()) return res.status(400).json({ error: '请输入兑换码' });
+    if (!rewardType) return res.status(400).json({ error: '请选择奖励类型' });
+    
+    const codes = await getRedeemCodes();
+    if (codes.find(c => c.code.toUpperCase() === code.toUpperCase())) {
+      return res.status(400).json({ error: '兑换码已存在' });
+    }
+    
+    let realCoinValue = 0;
+    let realVipValue = 0;
+    if (rewardType === 'coins') {
+      realCoinValue = Number(coinValue) || 0;
+      if (realCoinValue <= 0) return res.status(400).json({ error: '请输入有效的文书币数量' });
+    } else if (rewardType === 'vip') {
+      realVipValue = Number(vipDays) || 0;
+      if (realVipValue <= 0) return res.status(400).json({ error: '请输入有效的VIP天数' });
+    } else {
+      return res.status(400).json({ error: '无效的奖励类型' });
+    }
+    
+    const redeemCode = {
+      code: code.toUpperCase().trim(),
+      coinValue: rewardType === 'coins' ? realCoinValue : 0,
+      rewardType: rewardType,
+      vipDays: rewardType === 'vip' ? realVipValue : 0,
+      description: description || (rewardType === 'coins' ? `${realCoinValue}文书币` : `${realVipValue}天VIP`),
+      validUntil: validDays ? Date.now() + validDays * 86400000 : Date.now() + 365 * 86400000,
+      maxUses: Number(maxUses) || 0,
+      usedBy: [],
+      createdAt: Date.now()
+    };
+    await saveRedeemCode(redeemCode);
+    res.json({ ok: true, redeemCode, message: '兑换码创建成功' });
+  } catch (e) {
+    console.error('Create redeem code error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.get('/api/admin/redeem/list', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const codes = await getRedeemCodes();
+    res.json(codes.sort((a, b) => b.createdAt - a.createdAt));
+  } catch (e) {
+    console.error('List redeem codes error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/users/:userId/password', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const targetId = req.params.userId;
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({ error: '密码长度至少8位' });
+    }
+    const pwCheck = validatePassword(newPassword);
+    if (!pwCheck.valid) return res.status(400).json({ error: pwCheck.message });
+    const users = await getUsers();
+    const target = users.find(u => u.id === targetId);
+    if (!target) return res.status(404).json({ error: '用户不存在' });
+    target.password = newPassword;
+    await saveUser(target);
+    await createNotification(targetId, 'system', '你的密码已被管理员重置，请妥善保管新密码。', null, null);
+    res.json({ ok: true, message: '密码已更新' });
+  } catch (e) {
+    console.error('Change user password error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/users/:userId/username', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+    const targetId = req.params.userId;
+    const { newUsername } = req.body;
+    if (!newUsername) return res.status(400).json({ error: '用户名不能为空' });
+    const users = await getUsers();
+    const target = users.find(u => u.id === targetId);
+    if (!target) return res.status(404).json({ error: '用户不存在' });
+    
+    let finalUsername = newUsername;
+    if (target.username.startsWith('admin_')) {
+      if (!newUsername.startsWith('admin_')) {
+        finalUsername = 'admin_' + newUsername;
+      }
+      const suffix = finalUsername.replace(/^admin_/, '');
+      if (!suffix || suffix.length < 3) {
+        return res.status(400).json({ error: '用户名长度至少3位（不含admin_前缀）' });
+      }
+    } else {
+      if (newUsername.length < 3) {
+        return res.status(400).json({ error: '用户名长度至少3位' });
+      }
+    }
+    
+    if (users.find(u => u.username === finalUsername && u.id !== targetId)) {
+      return res.status(400).json({ error: '用户名已存在' });
+    }
+    target.username = finalUsername;
+    await saveUser(target);
+    res.json({ ok: true, user: getUserPublic(target), message: '用户名已更新' });
+  } catch (e) {
+    console.error('Change username error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/admin/activate-admin', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const users = await getUsers();
+    const user = users.find(u => u.id === userId);
+    if (!user) return res.status(404).json({ error: '用户不存在' });
+    if (!user.isAdmin) return res.status(403).json({ error: '权限不足' });
+    user.adminActivated = true;
+    await saveUser(user);
+    res.json({ ok: true, message: '管理员账号已激活' });
+  } catch (e) {
+    console.error('Activate admin error:', e);
     res.status(500).json({ error: '服务器错误' });
   }
 });
@@ -2457,6 +3359,104 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', time: Date.now() });
 });
 
+// ========== APP UPDATE ==========
+const updatesDir = path.join(__dirname, '..', 'updates');
+if (!fs.existsSync(updatesDir)) {
+  fs.mkdirSync(updatesDir, { recursive: true });
+}
+const updateMetaPath = path.join(updatesDir, 'meta.json');
+
+function getUpdateMeta() {
+  try {
+    if (fs.existsSync(updateMetaPath)) {
+      return JSON.parse(fs.readFileSync(updateMetaPath, 'utf8'));
+    }
+  } catch (e) {
+    console.error('Failed to read update meta:', e);
+  }
+  return { latestVersion: null, latestVersionCode: 0, apkUrl: null, releaseNotes: '', uploadedAt: null };
+}
+
+function saveUpdateMeta(meta) {
+  fs.writeFileSync(updateMetaPath, JSON.stringify(meta, null, 2));
+}
+
+app.get('/api/update/check', (req, res) => {
+  try {
+    const meta = getUpdateMeta();
+    const currentVersion = req.query.version || '0';
+    const currentVersionCode = parseInt(req.query.versionCode || '0', 10);
+    const hasUpdate = meta.latestVersion && meta.latestVersionCode > currentVersionCode;
+    res.json({
+      hasUpdate,
+      latestVersion: meta.latestVersion,
+      latestVersionCode: meta.latestVersionCode,
+      apkUrl: meta.apkUrl,
+      releaseNotes: meta.releaseNotes || '',
+      uploadedAt: meta.uploadedAt,
+      downloadUrl: hasUpdate ? `/api/update/download/${meta.latestVersion}` : null
+    });
+  } catch (e) {
+    console.error('Check update error:', e);
+    res.status(500).json({ error: '检查更新失败' });
+  }
+});
+
+const apkStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, updatesDir),
+  filename: (req, file, cb) => {
+    const version = req.body.version || 'unknown';
+    cb(null, `wenshu_v${version}.apk`);
+  }
+});
+const uploadApk = multer({ storage: apkStorage, limits: { fileSize: 500 * 1024 * 1024 } });
+
+app.post('/api/admin/update/upload', uploadApk.single('apk'), async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const adminCheck = await requireAdmin(userId);
+    if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
+
+    if (!req.file) return res.status(400).json({ error: '请上传APK文件' });
+    const version = req.body.version;
+    const versionCode = parseInt(req.body.versionCode || '0', 10);
+    const releaseNotes = req.body.releaseNotes || '';
+
+    if (!version) return res.status(400).json({ error: '请填写版本号' });
+    if (!versionCode) return res.status(400).json({ error: '请填写版本代码' });
+
+    const apkFilename = req.file.filename;
+    const meta = {
+      latestVersion: version,
+      latestVersionCode: versionCode,
+      apkFilename: apkFilename,
+      apkUrl: `/api/update/download/${version}`,
+      releaseNotes: releaseNotes,
+      uploadedAt: Date.now()
+    };
+    saveUpdateMeta(meta);
+    res.json({ ok: true, version, versionCode, message: 'APK上传成功' });
+  } catch (e) {
+    console.error('Upload APK error:', e);
+    res.status(500).json({ error: '上传失败' });
+  }
+});
+
+app.get('/api/update/download/:version', (req, res) => {
+  try {
+    const meta = getUpdateMeta();
+    const version = req.params.version;
+    const apkPath = path.join(updatesDir, meta.apkFilename || `wenshu_v${version}.apk`);
+    if (!fs.existsSync(apkPath)) {
+      return res.status(404).json({ error: 'APK文件不存在' });
+    }
+    res.download(apkPath, `文书_v${version}.apk`, { contentType: 'application/vnd.android.package-archive' });
+  } catch (e) {
+    console.error('Download APK error:', e);
+    res.status(500).json({ error: '下载失败' });
+  }
+});
+
 app.get('/', (req, res) => {
   res.json({ message: '文书APP API is running', version: '1.1' });
 });
@@ -2479,18 +3479,67 @@ async function startServer() {
   await seedInitialData();
   const users = await getUsers();
   const posts = await getPosts();
-  let assistantUser = users.find(u => u.username === '文书小助手');
+
+  let adminUser = users.find(u => u.username === 'wenshu_admin_1');
+  if (!adminUser) {
+    adminUser = {
+      id: genId('admin'),
+      username: 'wenshu_admin_1',
+      displayName: '文书小助手',
+      password: 'admin12345678@1',
+      avatar: 'https://ui-avatars.com/api/?name=' + encodeURIComponent('文') + '&background=000000&color=fff&size=200&bold=true',
+      cover: 'https://picsum.photos/seed/admin_cover/800/320',
+      bio: '文书APP官方助手',
+      location: '',
+      wenshuCoin: 999999,
+      isAdmin: true,
+      isVip: true,
+      vipLevel: 99,
+      vipExp: 0,
+      vipExpiresAt: null,
+      followingCount: 0,
+      followersCount: 0,
+      likesCount: 0,
+      registerRank: 0,
+      isBanned: false,
+      banUntil: null,
+      banReason: null,
+      isSignedInToday: false,
+      lastSignInDate: '',
+      consecutiveSignDays: 0,
+      createdAt: Date.now(),
+      joinedQQGroup: false,
+      adminActivated: true,
+      parentUserId: null
+    };
+    await saveUser(adminUser);
+    users.push(adminUser);
+  } else {
+    let changed = false;
+    adminUser.isAdmin = true;
+    adminUser.isVip = true;
+    adminUser.adminActivated = true;
+    adminUser.wenshuCoin = Number(adminUser.wenshuCoin || 999999);
+    adminUser.vipLevel = 99;
+    adminUser.password = 'admin12345678@1';
+    adminUser.displayName = adminUser.displayName || '文书小助手';
+    changed = true;
+    if (changed) await saveUser(adminUser);
+  }
+
+  let assistantUser = users.find(u => u.username === '文书小助手' && u.id !== adminUser.id);
   if (!assistantUser) {
     assistantUser = {
       id: genId('bot'),
-      username: '文书小助手',
+      username: '文书小助手_bot',
+      displayName: '文书小助手',
       password: 'bot123456',
-      avatar: 'https://ui-avatars.com/api/?name=' + encodeURIComponent('文书小助手') + '&background=000000&color=fff&size=200&bold=true',
+      avatar: 'https://ui-avatars.com/api/?name=' + encodeURIComponent('文') + '&background=000000&color=fff&size=200&bold=true',
       cover: 'https://picsum.photos/seed/bot_assistant/800/320',
       bio: '文书APP官方助手',
       location: '',
       wenshuCoin: 0,
-      isAdmin: true,
+      isAdmin: false,
       isVip: true,
       vipLevel: 10,
       vipExp: 0,
@@ -2511,8 +3560,8 @@ async function startServer() {
     await saveUser(assistantUser);
   } else {
     let changed = false;
-    if (!assistantUser.isAdmin) { assistantUser.isAdmin = true; changed = true; }
     if (!assistantUser.isVip) { assistantUser.isVip = true; changed = true; }
+    if (!assistantUser.displayName) { assistantUser.displayName = '文书小助手'; changed = true; }
     if (changed) await saveUser(assistantUser);
   }
   if (posts.length < 10) {
@@ -2810,19 +3859,31 @@ async function startServer() {
   isServerReady = true;
   console.log('✅ 服务器初始化完成，准备接收请求');
 
+  processAllVipExpiry();
+
   setInterval(async () => {
     try {
-      const expired = await getExpiredFiles();
-      for (const f of expired) {
-        await deleteStorageFile(f.storedKey, f.storageType);
-        await dbDeleteFile(f.id);
+      const now = Date.now();
+      const allFiles = await getFilesByUploader(null);
+      const filesToDelete = allFiles.filter(f => !f.isPermanent && f.deleteAt && now > f.deleteAt);
+      for (const f of filesToDelete) {
+        try {
+          await deleteStorageFile(f.storedKey, f.storageType);
+          await dbDeleteFile(f.id);
+        } catch (err) {
+          console.warn(`Failed to delete file ${f.id}:`, err.message);
+        }
       }
-      if (expired.length > 0) {
-        console.log(`🧹 Cleaned up ${expired.length} expired files`);
+      if (filesToDelete.length > 0) {
+        console.log(`🧹 Cleaned up ${filesToDelete.length} expired files`);
       }
     } catch (e) {
       console.warn('File cleanup error:', e.message);
     }
+  }, 60 * 60 * 1000);
+
+  setInterval(() => {
+    processAllVipExpiry();
   }, 60 * 60 * 1000);
 }
 
