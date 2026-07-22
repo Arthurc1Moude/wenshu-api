@@ -1,7 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
-import { v4 as uuidv4 } from 'uuid';
+import {
+import { pinyin } from 'pinyin-pro'; v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -570,12 +571,12 @@ app.post('/api/coin/signin', async (req, res) => {
         coinsReward = 50;
         vipDays = 7;
         rewardDesc = '50文书币 + 7天免费VIP体验';
-        if (user.isVip) {
-          user.vipExpiresAt = (user.vipExpiresAt || Date.now()) + vipDays * 86400000;
+        if (user.isVip && user.vipExpiresAt && Number(user.vipExpiresAt) > Date.now()) {
+          user.vipExpiresAt = Number(user.vipExpiresAt) + vipDays * 86400000;
         } else {
           user.isVip = true;
-          user.vipLevel = 1;
-          user.vipExp = 0;
+          user.vipLevel = Math.max(1, user.lastVipLevel || user.vipLevel || 1);
+          user.vipExp = user.vipExp || 0;
           user.vipExpiresAt = Date.now() + vipDays * 86400000;
         }
         user.consecutiveSignDays = 0;
@@ -633,16 +634,32 @@ app.post('/api/vip/purchase', async (req, res) => {
     const users = await getUsers();
     const user = users.find(u => u.id === userId);
     if (!user) return res.status(401).json({ error: '未登录' });
-    if (user.isVip) return res.status(400).json({ error: '已是文书会会员' });
 
-    user.isVip = true;
-    user.vipLevel = 1;
-    user.vipExp = 0;
-    user.vipExpiresAt = Date.now() + 365 * 24 * 3600 * 1000;
-    user.wenshuCoin = Number(user.wenshuCoin || 0) + 500;
+    const { plan } = req.body;
+    const vipPlan = plan === 'monthly' ? 'monthly' : 'yearly';
+    const vipDays = vipPlan === 'monthly' ? 30 : 365;
+    const now = Date.now();
+
+    const isCurrentlyVip = user.isVip && user.vipExpiresAt && Number(user.vipExpiresAt) > now;
+    const baseExpire = isCurrentlyVip ? Number(user.vipExpiresAt) : now;
+
+    if (!isCurrentlyVip) {
+      user.isVip = true;
+      user.vipLevel = Math.max(1, user.lastVipLevel || user.vipLevel || 1);
+      user.vipExp = user.vipExp || 0;
+    }
+
+    user.vipExpiresAt = baseExpire + vipDays * 24 * 3600 * 1000;
+    user.vipPlan = vipPlan;
+
+    if (!isCurrentlyVip) {
+      user.wenshuCoin = Number(user.wenshuCoin || 0) + 500;
+      await safeNotify(user.id, 'vip', '欢迎加入文书会！获得500文书币开通奖励，开始享受会员特权吧！', null, null, null, { type: 'vip_purchased' });
+    } else {
+      await safeNotify(user.id, 'vip', '续费成功！' + (vipPlan === 'yearly' ? '年度' : '月度') + '会员已延长', null, null, null, { type: 'vip_renewed' });
+    }
+
     await saveUser(user);
-
-    await createNotification(user.id, 'vip', '欢迎加入文书会！获得500文书币开通奖励，开始享受会员特权吧！', null, null);
     res.json({ user: getUserPublic(user) });
   } catch (e) {
     console.error('VIP purchase error:', e);
@@ -673,13 +690,14 @@ app.post('/api/redeem', async (req, res) => {
     let responseData = { coins: 0, vipGranted: false, description: redeemCode.description, totalCoins: user.wenshuCoin };
 
     if (redeemCode.rewardType === 'vip') {
-      if (user.isVip) {
-        user.vipExpiresAt = (user.vipExpiresAt || Date.now()) + 365 * 24 * 3600 * 1000;
+      const nowRedeem = Date.now();
+      if (user.isVip && user.vipExpiresAt && Number(user.vipExpiresAt) > nowRedeem) {
+        user.vipExpiresAt = Number(user.vipExpiresAt) + 365 * 24 * 3600 * 1000;
       } else {
         user.isVip = true;
-        user.vipLevel = 1;
-        user.vipExp = 0;
-        user.vipExpiresAt = Date.now() + 365 * 24 * 3600 * 1000;
+        user.vipLevel = Math.max(1, user.lastVipLevel || user.vipLevel || 1);
+        user.vipExp = user.vipExp || 0;
+        user.vipExpiresAt = nowRedeem + 365 * 24 * 3600 * 1000;
       }
       responseData.vipGranted = true;
       responseData.vipExpiresAt = user.vipExpiresAt;
@@ -1698,12 +1716,49 @@ app.post('/api/auth/change-password', async (req, res) => {
   }
 });
 
+
+function toPinyin(text) {
+  if (!text) return '';
+  try {
+    return pinyin(text, { toneType: 'none', type: 'array' }).join('').toLowerCase();
+  } catch(e) {
+    return String(text).toLowerCase();
+  }
+}
+
+function pinyinInitials(text) {
+  if (!text) return '';
+  try {
+    return pinyin(text, { pattern: 'first', toneType: 'none', type: 'array' }).join('').toLowerCase();
+  } catch(e) {
+    return String(text).toLowerCase();
+  }
+}
+
+function textMatchesPinyin(text, query, keywords) {
+  if (text === null || text === undefined) return false;
+  const t = String(text).toLowerCase();
+  if (!t) return false;
+  if (t.includes(query)) return true;
+  const py = toPinyin(text);
+  const pyInit = pinyinInitials(text);
+  if (py.includes(query) || pyInit.includes(query)) return true;
+  if (keywords) {
+    for (const kw of keywords) {
+      if (kw && kw.length >= 1) {
+        if (t.includes(kw) || py.includes(kw) || pyInit.includes(kw)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 // ========== SEARCH ==========
 app.get('/api/search', async (req, res) => {
   try {
     const { q, type } = req.query;
     const currentUserId = getUserId(req);
-    if (!q || !q.trim()) return res.json({ posts: [], users: [], tags: [], comments: [] });
+    if (!q || !q.trim()) return res.json({ posts: [], users: [], groups: [], tags: [], comments: [] });
     const query = q.trim();
     const queryLower = String(query).toLowerCase();
 
@@ -1729,14 +1784,7 @@ app.get('/api/search', async (req, res) => {
     }
 
     function textMatches(text) {
-      if (text === null || text === undefined) return false;
-      const t = safeString(text);
-      if (!t) return false;
-      if (t.includes(queryLower)) return true;
-      for (const kw of keywords) {
-        if (kw && kw.length >= 1 && t.includes(kw)) return true;
-      }
-      return false;
+      return textMatchesPinyin(text, queryLower, keywords);
     }
 
     let posts = [], users = [];
@@ -1815,7 +1863,44 @@ app.get('/api/search', async (req, res) => {
 
     const filterType = type || 'all';
 
-    let matchedPosts = [];
+        if (matchedUsers.length >= 30) break;
+      }
+    }
+
+    let matchedGroups = [];
+    if (filterType === 'all' || filterType === 'groups') {
+      try {
+        const allGroups = await getGroupChats();
+        for (const g of allGroups) {
+          if (!g) continue;
+          const name = String(g.name || '');
+          const number = String(g.groupNumber || '');
+          const code = String(g.joinCode || '').toLowerCase();
+          let match = false;
+          if (number.includes(queryLower) || code.includes(queryLower)) match = true;
+          if (!match && usernameQuery) {
+            match = false;
+          } else if (!match) {
+            match = textMatchesPinyin(name, queryLower, keywords);
+          }
+          if (match) {
+            const members = await getGroupMembers(g.id);
+            matchedGroups.push({
+              id: g.id,
+              name: g.name,
+              avatar: g.avatar,
+              groupNumber: g.groupNumber,
+              memberCount: members.length,
+              isJoined: currentUserId ? members.some(m => m.userId === currentUserId) : false,
+              isOwner: g.ownerId === currentUserId
+            });
+          }
+          if (matchedGroups.length >= 20) break;
+        }
+      } catch(e) { console.error('Group search error:', e); }
+    }
+
+        let matchedPosts = [];
     if (filterType === 'all' || filterType === 'posts') {
       for (const p of posts) {
         try {
@@ -1840,7 +1925,7 @@ app.get('/api/search', async (req, res) => {
               if (usernameQuery) {
                 if (safeString(author.username).includes(usernameQuery)) matches = true;
               } else {
-                if (textMatches(author.username) || textMatches(author.bio || '')) matches = true;
+                if (textMatchesPinyin(author.username, queryLower, keywords) || textMatchesPinyin(author.displayName || author.username, queryLower, keywords) || textMatchesPinyin(author.bio || '', queryLower, keywords)) matches = true;
               }
             }
           }
@@ -1862,7 +1947,7 @@ app.get('/api/search', async (req, res) => {
           if (usernameQuery) {
             matches = uname.includes(usernameQuery);
           } else {
-            matches = textMatches(u.username) || textMatches(u.bio || '');
+            matches = textMatchesPinyin(u.username, queryLower, keywords) || textMatchesPinyin(u.displayName || u.username, queryLower, keywords) || textMatchesPinyin(u.bio || '', queryLower, keywords);
           }
           if (matches) {
             matchedUsers.push(getUserPublic(u));
@@ -1890,12 +1975,13 @@ app.get('/api/search', async (req, res) => {
     res.json({
       posts: postsWithAuthor,
       users: matchedUsers,
+      groups: matchedGroups,
       tags: matchedTags,
       comments: matchedComments.slice(0, 30)
     });
   } catch (e) {
     console.error('Search error:', e);
-    res.status(500).json({ error: '服务器错误', posts: [], users: [], tags: [], comments: [] });
+    res.status(500).json({ error: '服务器错误', posts: [], users: [], groups: [], tags: [], comments: [] });
   }
 });
 
@@ -2632,7 +2718,50 @@ app.use((req, res) => {
 });
 
 async function startServer() {
-  const server = app.listen(PORT, '0.0.0.0', () => {
+  const server = 
+// ========== GROUP SEARCH ==========
+app.get('/api/groups/search', async (req, res) => {
+  try {
+    const { q } = req.query;
+    const userId = getUserId(req);
+    if (!q || !q.trim()) return res.json({ groups: [] });
+    const query = q.trim().toLowerCase();
+    const keywords = query.split(/[\s,，。.!！?？；;、]+/).filter(k => k && k.length >= 1);
+    const groups = await getGroupChats();
+    const matched = [];
+    for (const g of groups) {
+      if (!g) continue;
+      const name = String(g.name || '');
+      const number = String(g.groupNumber || '');
+      const code = String(g.joinCode || '').toLowerCase();
+      let match = false;
+      if (number.includes(query) || code.includes(query)) match = true;
+      if (!match) match = textMatchesPinyin(name, query, keywords);
+      if (match) {
+        const members = await getGroupMembers(g.id);
+        const memberCount = members.length;
+        const isMember = userId ? members.some(m => m.userId === userId) : false;
+        matched.push({
+          id: g.id,
+          name: g.name,
+          avatar: g.avatar,
+          groupNumber: g.groupNumber,
+          memberCount: memberCount,
+          joinCode: isMember ? g.joinCode : null,
+          isJoined: isMember,
+          isOwner: g.ownerId === userId
+        });
+      }
+      if (matched.length >= 50) break;
+    }
+    res.json({ groups: matched });
+  } catch (e) {
+    console.error('Group search error:', e);
+    res.status(500).json({ error: '服务器错误', groups: [] });
+  }
+});
+
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 文书APP后端服务运行在 port ${PORT}`);
   });
 
