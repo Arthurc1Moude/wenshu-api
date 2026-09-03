@@ -18,7 +18,7 @@ import {
   pgFindUserByPhone,
   pgGetCommentLikes, pgAddCommentLike, pgDeleteCommentLike, pgGetCommentLikeCount, pgIsCommentLikedByUser,
   pgGetGroupChats, pgGetGroupChatById, pgGetGroupChatByNumber, pgSaveGroupChat,
-  pgGetGroupMembers, pgGetUserGroups, pgAddGroupMember, pgRemoveGroupMember, pgIsGroupMember, pgGenerateGroupNumber,
+  pgGetGroupMembers, pgGetUserGroups, pgAddGroupMember, pgRemoveGroupMember, pgSetGroupMemberRole, pgIsGroupMember, pgGenerateGroupNumber,
   pgSaveFile, pgGetFileById, pgGetFilesByPost, pgGetFilesByUploader, pgGetAllFiles, pgDeleteFile,
   pgIncrementFileDownload, pgGetExpiredFiles, pgGetUserTotalStorage,
   pgSaveUrlPreview, pgGetUrlPreview,
@@ -346,6 +346,14 @@ export async function addGroupMember(member) {
 export async function removeGroupMember(groupId, userId) {
   if (useMem) { memGroupMembers = memGroupMembers.filter(m => !(m.groupId === groupId && m.userId === userId)); return; }
   return pgRemoveGroupMember(groupId, userId);
+}
+export async function setGroupMemberRole(groupId, userId, role) {
+  if (useMem) {
+    const m = memGroupMembers.find(x => x.groupId === groupId && x.userId === userId);
+    if (m) m.role = role;
+    return;
+  }
+  return pgSetGroupMemberRole(groupId, userId, role);
 }
 export async function isGroupMember(groupId, userId) {
   if (useMem) return memGroupMembers.some(m => m.groupId === groupId && m.userId === userId);

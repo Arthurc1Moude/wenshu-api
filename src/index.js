@@ -27,7 +27,7 @@ import {
   findUserByPhone,
   getCommentLikes, addCommentLike, removeCommentLike, isCommentLikedByUser, getCommentLikeCount,
   getGroupChats, getGroupChatById, getGroupChatByNumber, saveGroupChat,
-  getGroupMembers, getUserGroups, addGroupMember, removeGroupMember, isGroupMember, generateGroupNumber,
+  getGroupMembers, getUserGroups, addGroupMember, removeGroupMember, setGroupMemberRole, isGroupMember, generateGroupNumber,
   getTips, addTip,
   isUsingMemoryStorage
 } from './db.js';
@@ -3333,7 +3333,7 @@ app.get('/api/groups/:id/members', async (req, res) => {
     const users = await getUsers();
     const result = members.map(m => {
       const u = users.find(u => u.id === m.userId);
-      return u ? { userId: m.userId, role: m.role, username: u.username, avatar: u.avatar, isVip: u.isVip } : null;
+      return u ? { userId: m.userId, role: m.role, username: u.username, displayName: u.displayName || u.username, avatar: u.avatar, isVip: u.isVip } : null;
     }).filter(Boolean);
     res.json(result);
   } catch (e) {
@@ -3355,6 +3355,57 @@ app.post('/api/groups/:id/leave', async (req, res) => {
     res.json({ ok: true });
   } catch (e) {
     console.error('Leave group error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 设置群成员角色（仅群主：设为/取消管理员）
+app.post('/api/groups/:id/members/:userId/role', async (req, res) => {
+  try {
+    const operatorId = getUserId(req);
+    if (!operatorId) return res.status(401).json({ error: '未登录' });
+    const group = await getGroupChatById(req.params.id);
+    if (!group) return res.status(404).json({ error: '群聊不存在' });
+    if (group.ownerId !== operatorId) return res.status(403).json({ error: '仅群主可管理管理员' });
+    const targetId = req.params.userId;
+    if (targetId === group.ownerId) return res.status(400).json({ error: '不能修改群主角色' });
+    const members = await getGroupMembers(group.id);
+    if (!members.find(m => m.userId === targetId)) return res.status(404).json({ error: '该成员不在群中' });
+    const role = req.body && req.body.role === 'admin' ? 'admin' : 'member';
+    await setGroupMemberRole(group.id, targetId, role);
+    res.json({ ok: true, role });
+  } catch (e) {
+    console.error('Set member role error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 移除群成员（群主可移除任何人；管理员仅可移除普通成员）
+app.post('/api/groups/:id/members/:userId/remove', async (req, res) => {
+  try {
+    const operatorId = getUserId(req);
+    if (!operatorId) return res.status(401).json({ error: '未登录' });
+    const group = await getGroupChatById(req.params.id);
+    if (!group) return res.status(404).json({ error: '群聊不存在' });
+    const targetId = req.params.userId;
+    if (targetId === group.ownerId) return res.status(400).json({ error: '不能移除群主' });
+    const members = await getGroupMembers(group.id);
+    const operator = members.find(m => m.userId === operatorId);
+    const isOwner = group.ownerId === operatorId;
+    if (!isOwner && (!operator || operator.role !== 'admin')) {
+      return res.status(403).json({ error: '仅群主或管理员可移除成员' });
+    }
+    const target = members.find(m => m.userId === targetId);
+    if (!target) return res.status(404).json({ error: '该成员不在群中' });
+    if (!isOwner && target.role === 'admin') {
+      return res.status(403).json({ error: '管理员不能移除其他管理员' });
+    }
+    await removeGroupMember(group.id, targetId);
+    group.memberCount = Math.max(1, (group.memberCount || 1) - 1);
+    await saveGroupChat(group);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Remove group member error:', e);
     res.status(500).json({ error: '服务器错误' });
   }
 });

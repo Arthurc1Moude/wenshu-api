@@ -990,6 +990,10 @@ export async function pgRemoveGroupMember(groupId, userId) {
   await pool.query('DELETE FROM group_members WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
 }
 
+export async function pgSetGroupMemberRole(groupId, userId, role) {
+  await pool.query('UPDATE group_members SET role = $1 WHERE group_id = $2 AND user_id = $3', [role, groupId, userId]);
+}
+
 export async function pgIsGroupMember(groupId, userId) {
   const res = await pool.query('SELECT 1 FROM group_members WHERE group_id = $1 AND user_id = $2', [groupId, userId]);
   return res.rows.length > 0;
