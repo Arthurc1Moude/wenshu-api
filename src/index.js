@@ -30,6 +30,9 @@ import {
   getGroupMembers, getUserGroups, addGroupMember, removeGroupMember, setGroupMemberRole, isGroupMember, generateGroupNumber,
   getTips, addTip,
   getRedPackets, getRedPacketById, saveRedPacket,
+  deleteComment,
+  getGroupActivities, getGroupActivityById, saveGroupActivity,
+  getMessageFavorites, addMessageFavorite, removeMessageFavorite,
   isUsingMemoryStorage
 } from './db.js';
 
@@ -1262,7 +1265,18 @@ app.get('/api/posts/:id/comments', async (req, res) => {
     const currentUserId = getUserId(req);
     const comments = await getComments();
     const users = await getUsers();
-    const postComments = comments.filter(c => c.postId === req.params.id).sort((a, b) => a.createdAt - b.createdAt);
+    const posts = await getPosts();
+    const post = posts.find(p => p.id === req.params.id);
+    const postAuthorId = post ? post.authorId : null;
+    const postComments = comments.filter(c => c.postId === req.params.id).sort((a, b) => {
+      // 排序规则：帖子作者的评论最靠前（作者标识，不显示置顶标），其次是被作者置顶的评论，其余按时间
+      const aAuthor = postAuthorId && a.authorId === postAuthorId;
+      const bAuthor = postAuthorId && b.authorId === postAuthorId;
+      if (aAuthor !== bAuthor) return aAuthor ? -1 : 1;
+      const aPin = !!a.isPinned, bPin = !!b.isPinned;
+      if (aPin !== bPin) return aPin ? -1 : 1;
+      return a.createdAt - b.createdAt;
+    });
     const result = [];
     for (const c of postComments) {
       const author = users.find(u => u.id === c.authorId);
@@ -1273,8 +1287,10 @@ app.get('/api/posts/:id/comments', async (req, res) => {
         ...c,
         likeCount,
         isLiked,
+        isPinned: !!c.isPinned,
+        isAuthor: !!(postAuthorId && c.authorId === postAuthorId),
         author: author ? getUserPublic(author) : null,
-        replyToUser: replyToUser ? { id: replyToUser.id, username: replyToUser.username } : null
+        replyToUser: replyToUser ? { id: replyToUser.id, username: replyToUser.username, displayName: replyToUser.displayName || replyToUser.username } : null
       });
     }
     res.json(result);
@@ -1305,11 +1321,12 @@ app.post('/api/posts/:id/comments', async (req, res) => {
       content: content.trim(),
       likeCount: 0,
       isLiked: false,
+      isPinned: false,
       createdAt: Date.now(),
       replyToId: replyToId || null
     };
     await saveComment(comment);
-    post.commentCount++;
+    post.commentCount = Number(post.commentCount || 0) + 1;
     await savePost(post);
 
     await addVipExp(userId, 5);
@@ -1366,6 +1383,262 @@ app.post('/api/comments/:id/like', async (req, res) => {
     res.json({ likeCount, isLiked });
   } catch (e) {
     console.error('Comment like error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ========== COMMENT PIN / DELETE ==========
+app.post('/api/comments/:id/pin', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const comments = await getComments();
+    const comment = comments.find(c => c.id === req.params.id);
+    if (!comment) return res.status(404).json({ error: '评论不存在' });
+    const posts = await getPosts();
+    const post = posts.find(p => p.id === comment.postId);
+    if (!post) return res.status(404).json({ error: '帖子不存在' });
+    if (post.authorId !== userId) return res.status(403).json({ error: '只有帖子作者可以置顶评论' });
+    comment.isPinned = !!(req.body && req.body.pinned);
+    await saveComment(comment);
+    res.json({ id: comment.id, isPinned: comment.isPinned });
+  } catch (e) {
+    console.error('Comment pin error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.delete('/api/comments/:id', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const comments = await getComments();
+    const comment = comments.find(c => c.id === req.params.id);
+    if (!comment) return res.status(404).json({ error: '评论不存在' });
+    const posts = await getPosts();
+    const post = posts.find(p => p.id === comment.postId);
+    if (comment.authorId !== userId && (!post || post.authorId !== userId)) {
+      return res.status(403).json({ error: '只能删除自己的评论或自己帖子下的评论' });
+    }
+    await deleteComment(comment.id);
+    if (post) {
+      post.commentCount = Math.max(0, Number(post.commentCount || 1) - 1);
+      await savePost(post);
+    }
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Comment delete error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ========== GROUP ACTIVITIES (chain / form / homework) ==========
+const GA_KINDS = ['chain', 'form', 'homework'];
+
+async function getGroupRole(groupId, userId) {
+  const group = await getGroupChatById(groupId);
+  if (!group) return null;
+  if (group.ownerId === userId) return 'owner';
+  const members = await getGroupMembers(groupId);
+  const m = members.find(x => x.userId === userId);
+  return m ? (m.role || 'member') : null;
+}
+
+app.get('/api/groups/:id/activities', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    if (!(await isGroupMember(req.params.id, userId))) return res.status(403).json({ error: '你不是群成员' });
+    let list = await getGroupActivities(req.params.id);
+    if (req.query.kind && GA_KINDS.includes(req.query.kind)) {
+      list = list.filter(a => a.kind === req.query.kind);
+    }
+    res.json(list.map(a => ({ ...a, entryCount: (a.entries || []).length })));
+  } catch (e) {
+    console.error('Get group activities error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/groups/:id/activities', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const role = await getGroupRole(req.params.id, userId);
+    if (!role) return res.status(403).json({ error: '你不是群成员' });
+    const { kind, title, content, fields, deadline } = req.body || {};
+    if (!GA_KINDS.includes(kind)) return res.status(400).json({ error: '活动类型不合法' });
+    if (!title || !String(title).trim()) return res.status(400).json({ error: '标题不能为空' });
+    if (kind === 'homework' && role === 'member') {
+      return res.status(403).json({ error: '只有群主或管理员可以布置作业' });
+    }
+    let fieldList = [];
+    if (kind === 'form') {
+      fieldList = Array.isArray(fields) ? fields.map(f => String(f).trim()).filter(Boolean).slice(0, 10) : [];
+      if (fieldList.length === 0) return res.status(400).json({ error: '群表格至少需要一个填写项' });
+    }
+    const users = await getUsers();
+    const me = users.find(u => u.id === userId);
+    const activity = {
+      id: genId('ga'),
+      groupId: req.params.id,
+      conversationId: req.params.id,
+      kind,
+      title: String(title).trim().slice(0, 100),
+      content: content ? String(content).trim().slice(0, 2000) : '',
+      fields: fieldList,
+      entries: [],
+      deadline: deadline ? Number(deadline) : null,
+      status: 'open',
+      creatorId: userId,
+      creatorName: me ? (me.displayName || me.username) : '',
+      createdAt: Date.now()
+    };
+    await saveGroupActivity(activity);
+    res.json(activity);
+  } catch (e) {
+    console.error('Create group activity error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.get('/api/group-activities/:aid', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const activity = await getGroupActivityById(req.params.aid);
+    if (!activity) return res.status(404).json({ error: '活动不存在或已结束' });
+    if (!(await isGroupMember(activity.groupId, userId))) return res.status(403).json({ error: '你不是群成员' });
+    res.json(activity);
+  } catch (e) {
+    console.error('Get group activity error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/group-activities/:aid/entries', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const activity = await getGroupActivityById(req.params.aid);
+    if (!activity) return res.status(404).json({ error: '活动不存在' });
+    if (!(await isGroupMember(activity.groupId, userId))) return res.status(403).json({ error: '你不是群成员' });
+    if (activity.status !== 'open') return res.status(400).json({ error: '活动已结束，不能再填写' });
+    if (activity.deadline && Date.now() > Number(activity.deadline)) {
+      activity.status = 'closed';
+      await saveGroupActivity(activity);
+      return res.status(400).json({ error: '已超过截止时间' });
+    }
+    const users = await getUsers();
+    const me = users.find(u => u.id === userId);
+    const name = me ? (me.displayName || me.username) : '';
+    const avatar = me ? (me.avatar || '') : '';
+    activity.entries = Array.isArray(activity.entries) ? activity.entries : [];
+
+    if (activity.kind === 'form') {
+      // 群表格：每人可填写多行
+      const values = Array.isArray(req.body && req.body.values)
+        ? req.body.values.map(v => String(v == null ? '' : v).trim()).slice(0, activity.fields.length)
+        : [];
+      if (values.length === 0 || values.every(v => !v)) return res.status(400).json({ error: '请至少填写一项内容' });
+      activity.entries.push({
+        id: genId('gae'),
+        userId, username: me ? me.username : '', displayName: name, avatar,
+        values, createdAt: Date.now()
+      });
+    } else {
+      // 接龙 / 作业：每人一条，可修改自己的
+      if (activity.kind === 'homework' && activity.creatorId === userId) {
+        return res.status(400).json({ error: '不能提交自己布置的作业' });
+      }
+      const content = req.body && req.body.content ? String(req.body.content).trim() : '';
+      if (!content) return res.status(400).json({ error: activity.kind === 'homework' ? '作业内容不能为空' : '接龙内容不能为空' });
+      const idx = activity.entries.findIndex(e => e.userId === userId);
+      const entry = {
+        id: idx >= 0 ? activity.entries[idx].id : genId('gae'),
+        userId, username: me ? me.username : '', displayName: name, avatar,
+        content: content.slice(0, 2000),
+        createdAt: idx >= 0 ? activity.entries[idx].createdAt : Date.now(),
+        submittedAt: Date.now()
+      };
+      if (idx >= 0) activity.entries[idx] = entry; else activity.entries.push(entry);
+    }
+    await saveGroupActivity(activity);
+    res.json(activity);
+  } catch (e) {
+    console.error('Group activity entry error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/group-activities/:aid/close', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const activity = await getGroupActivityById(req.params.aid);
+    if (!activity) return res.status(404).json({ error: '活动不存在' });
+    const role = await getGroupRole(activity.groupId, userId);
+    if (activity.creatorId !== userId && role !== 'owner' && role !== 'admin') {
+      return res.status(403).json({ error: '只有发起者、群主或管理员可以结束活动' });
+    }
+    activity.status = 'closed';
+    await saveGroupActivity(activity);
+    res.json(activity);
+  } catch (e) {
+    console.error('Group activity close error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// ========== MESSAGE FAVORITES ==========
+app.post('/api/messages/:id/favorite', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const allMessages = await getMessages();
+    const msg = allMessages.find(m => m.id === req.params.id);
+    if (!msg) return res.status(404).json({ error: '消息不存在' });
+    const users = await getUsers();
+    const sender = users.find(u => u.id === msg.senderId);
+    const fav = {
+      id: genId('fav'),
+      userId,
+      messageId: msg.id,
+      conversationId: msg.conversationId || '',
+      type: msg.type || 'text',
+      content: msg.content || '',
+      senderId: msg.senderId || '',
+      senderName: sender ? (sender.displayName || sender.username) : (msg.senderName || ''),
+      createdAt: Date.now()
+    };
+    await addMessageFavorite(fav);
+    res.json({ success: true, id: fav.id });
+  } catch (e) {
+    console.error('Favorite message error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.get('/api/favorites', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const list = await getMessageFavorites(userId);
+    res.json(list);
+  } catch (e) {
+    console.error('Get favorites error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.delete('/api/favorites/:favId', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    await removeMessageFavorite(req.params.favId, userId);
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Delete favorite error:', e);
     res.status(500).json({ error: '服务器错误' });
   }
 });

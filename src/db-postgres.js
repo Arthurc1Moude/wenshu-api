@@ -86,9 +86,12 @@ export async function initTables() {
         content TEXT NOT NULL,
         like_count INTEGER DEFAULT 0,
         reply_to_id TEXT,
+        is_pinned BOOLEAN DEFAULT FALSE,
         created_at BIGINT
       )
     `);
+
+    await client.query(`ALTER TABLE comments ADD COLUMN IF NOT EXISTS is_pinned BOOLEAN DEFAULT FALSE`);
 
     await client.query(`
       CREATE TABLE IF NOT EXISTS likes (
@@ -271,6 +274,38 @@ export async function initTables() {
         grab_type TEXT DEFAULT 'random',
         grabs JSONB DEFAULT '[]'::jsonb,
         refunded BOOLEAN DEFAULT false,
+        created_at BIGINT
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS group_activities (
+        id TEXT PRIMARY KEY,
+        group_id TEXT NOT NULL,
+        conversation_id TEXT DEFAULT '',
+        kind TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content TEXT DEFAULT '',
+        fields JSONB DEFAULT '[]'::jsonb,
+        entries JSONB DEFAULT '[]'::jsonb,
+        deadline BIGINT,
+        status TEXT DEFAULT 'open',
+        creator_id TEXT NOT NULL,
+        creator_name TEXT DEFAULT '',
+        created_at BIGINT
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS message_favorites (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        conversation_id TEXT DEFAULT '',
+        msg_type TEXT DEFAULT 'text',
+        content TEXT DEFAULT '',
+        sender_id TEXT DEFAULT '',
+        sender_name TEXT DEFAULT '',
         created_at BIGINT
       )
     `);
@@ -507,6 +542,7 @@ function rowToComment(row) {
     content: row.content,
     likeCount: Number(row.like_count) || 0,
     replyToId: row.reply_to_id,
+    isPinned: !!row.is_pinned,
     createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
 }
@@ -687,10 +723,92 @@ export async function pgGetComments() {
 
 export async function pgSaveComment(comment) {
   await pool.query(`
-    INSERT INTO comments (id, post_id, author_id, content, like_count, reply_to_id, created_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)
-    ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, like_count = EXCLUDED.like_count
-  `, [comment.id, comment.postId, comment.authorId, comment.content, comment.likeCount || 0, comment.replyToId, comment.createdAt]);
+    INSERT INTO comments (id, post_id, author_id, content, like_count, reply_to_id, is_pinned, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, like_count = EXCLUDED.like_count, is_pinned = EXCLUDED.is_pinned
+  `, [comment.id, comment.postId, comment.authorId, comment.content, comment.likeCount || 0, comment.replyToId, !!comment.isPinned, comment.createdAt]);
+}
+
+export async function pgDeleteComment(commentId) {
+  await pool.query('DELETE FROM comments WHERE id = $1', [commentId]);
+}
+
+function rowToGroupActivity(row) {
+  if (!row) return null;
+  let fields = [];
+  let entries = [];
+  try { fields = typeof row.fields === 'string' ? JSON.parse(row.fields || '[]') : (row.fields || []); } catch {}
+  try { entries = typeof row.entries === 'string' ? JSON.parse(row.entries || '[]') : (row.entries || []); } catch {}
+  return {
+    id: row.id,
+    groupId: row.group_id,
+    conversationId: row.conversation_id || '',
+    kind: row.kind,
+    title: row.title,
+    content: row.content || '',
+    fields,
+    entries,
+    deadline: row.deadline ? Number(row.deadline) : null,
+    status: row.status || 'open',
+    creatorId: row.creator_id,
+    creatorName: row.creator_name || '',
+    createdAt: Math.floor(Number(row.created_at) || Date.now())
+  };
+}
+
+export async function pgGetGroupActivities(groupId) {
+  const res = await pool.query('SELECT * FROM group_activities WHERE group_id = $1 ORDER BY created_at DESC', [groupId]);
+  return res.rows.map(rowToGroupActivity);
+}
+
+export async function pgGetGroupActivityById(id) {
+  const res = await pool.query('SELECT * FROM group_activities WHERE id = $1', [id]);
+  return rowToGroupActivity(res.rows[0]);
+}
+
+export async function pgSaveGroupActivity(a) {
+  await pool.query(`
+    INSERT INTO group_activities (id, group_id, conversation_id, kind, title, content, fields, entries, deadline, status, creator_id, creator_name, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+    ON CONFLICT (id) DO UPDATE SET title = EXCLUDED.title, content = EXCLUDED.content,
+      fields = EXCLUDED.fields, entries = EXCLUDED.entries, deadline = EXCLUDED.deadline, status = EXCLUDED.status
+  `, [a.id, a.groupId, a.conversationId || '', a.kind, a.title, a.content || '',
+      JSON.stringify(a.fields || []), JSON.stringify(a.entries || []),
+      a.deadline || null, a.status || 'open', a.creatorId, a.creatorName || '', a.createdAt]);
+  return a;
+}
+
+function rowToMessageFavorite(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    userId: row.user_id,
+    messageId: row.message_id,
+    conversationId: row.conversation_id || '',
+    type: row.msg_type || 'text',
+    content: row.content || '',
+    senderId: row.sender_id || '',
+    senderName: row.sender_name || '',
+    createdAt: Math.floor(Number(row.created_at) || Date.now())
+  };
+}
+
+export async function pgGetMessageFavorites(userId) {
+  const res = await pool.query('SELECT * FROM message_favorites WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+  return res.rows.map(rowToMessageFavorite);
+}
+
+export async function pgSaveMessageFavorite(f) {
+  await pool.query(`
+    INSERT INTO message_favorites (id, user_id, message_id, conversation_id, msg_type, content, sender_id, sender_name, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    ON CONFLICT (id) DO NOTHING
+  `, [f.id, f.userId, f.messageId, f.conversationId || '', f.type || 'text', f.content || '', f.senderId || '', f.senderName || '', f.createdAt]);
+  return f;
+}
+
+export async function pgDeleteMessageFavorite(id, userId) {
+  await pool.query('DELETE FROM message_favorites WHERE id = $1 AND user_id = $2', [id, userId]);
 }
 
 export async function pgGetLikes() {

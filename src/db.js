@@ -20,6 +20,9 @@ import {
   pgGetGroupChats, pgGetGroupChatById, pgGetGroupChatByNumber, pgSaveGroupChat,
   pgGetGroupMembers, pgGetUserGroups, pgAddGroupMember, pgRemoveGroupMember, pgSetGroupMemberRole, pgIsGroupMember, pgGenerateGroupNumber,
   pgGetRedPackets, pgGetRedPacketById, pgSaveRedPacket,
+  pgDeleteComment,
+  pgGetGroupActivities, pgGetGroupActivityById, pgSaveGroupActivity,
+  pgGetMessageFavorites, pgSaveMessageFavorite, pgDeleteMessageFavorite,
   pgSaveFile, pgGetFileById, pgGetFilesByPost, pgGetFilesByUploader, pgGetAllFiles, pgDeleteFile,
   pgIncrementFileDownload, pgGetExpiredFiles, pgGetUserTotalStorage,
   pgSaveUrlPreview, pgGetUrlPreview,
@@ -44,6 +47,8 @@ let memCommentLikes = [];
 let memGroupChats = [];
 let memGroupMembers = [];
 let memRedPackets = [];
+let memGroupActivities = [];
+let memMessageFavorites = [];
 let memRegisterCount = 0;
 let memVerifCodes = [];
 let memTips = [];
@@ -384,6 +389,45 @@ export async function saveRedPacket(p) {
     return p;
   }
   return pgSaveRedPacket(p);
+}
+
+export async function deleteComment(commentId) {
+  if (useMem) { memComments = memComments.filter(c => c.id !== commentId); return; }
+  return pgDeleteComment(commentId);
+}
+
+export async function getGroupActivities(groupId) {
+  if (useMem) return memGroupActivities.filter(a => a.groupId === groupId).sort((a, b) => b.createdAt - a.createdAt);
+  return pgGetGroupActivities(groupId);
+}
+export async function getGroupActivityById(id) {
+  if (useMem) return memGroupActivities.find(a => a.id === id) || null;
+  return pgGetGroupActivityById(id);
+}
+export async function saveGroupActivity(a) {
+  if (useMem) {
+    const i = memGroupActivities.findIndex(x => x.id === a.id);
+    if (i >= 0) memGroupActivities[i] = { ...memGroupActivities[i], ...a }; else memGroupActivities.push(a);
+    return a;
+  }
+  return pgSaveGroupActivity(a);
+}
+
+export async function getMessageFavorites(userId) {
+  if (useMem) return memMessageFavorites.filter(f => f.userId === userId).sort((a, b) => b.createdAt - a.createdAt);
+  return pgGetMessageFavorites(userId);
+}
+export async function addMessageFavorite(f) {
+  if (useMem) {
+    if (memMessageFavorites.find(x => x.userId === f.userId && x.messageId === f.messageId)) return f;
+    memMessageFavorites.push(f);
+    return f;
+  }
+  return pgSaveMessageFavorite(f);
+}
+export async function removeMessageFavorite(favId, userId) {
+  if (useMem) { memMessageFavorites = memMessageFavorites.filter(f => !(f.id === favId && f.userId === userId)); return; }
+  return pgDeleteMessageFavorite(favId, userId);
 }
 
 export async function getTips() { return useMem ? [...memTips] : pgGetTips(); }
