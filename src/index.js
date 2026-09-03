@@ -28,7 +28,8 @@ import {
   getCommentLikes, addCommentLike, removeCommentLike, isCommentLikedByUser, getCommentLikeCount,
   getGroupChats, getGroupChatById, getGroupChatByNumber, saveGroupChat,
   getGroupMembers, getUserGroups, addGroupMember, removeGroupMember, isGroupMember, generateGroupNumber,
-  getTips, addTip
+  getTips, addTip,
+  isUsingMemoryStorage
 } from './db.js';
 
 import {
@@ -66,7 +67,12 @@ app.use((req, res, next) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: isServerReady ? 'ok' : 'starting', port: PORT });
+  res.json({
+    status: isServerReady ? 'ok' : 'starting',
+    port: PORT,
+    storage: isUsingMemoryStorage() ? 'memory' : 'postgres',
+    time: Date.now()
+  });
 });
 
 app.use(cors({
@@ -3501,7 +3507,7 @@ app.get('/api/update/check', (req, res) => {
     const meta = getUpdateMeta();
     const currentVersion = req.query.version || '0';
     const currentVersionCode = parseInt(req.query.versionCode || '0', 10);
-    const hasUpdate = meta.latestVersion && meta.latestVersionCode > currentVersionCode;
+    const hasUpdate = !!(meta.latestVersion && meta.latestVersionCode > currentVersionCode);
     res.json({
       hasUpdate,
       latestVersion: meta.latestVersion,

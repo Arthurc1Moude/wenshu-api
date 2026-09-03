@@ -52,10 +52,63 @@ let useMem = false;
 
 function uid(prefix) { return prefix + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 
+let reconnectTimer = null;
+let healthCheckTimer = null;
+let reconnectAttempts = 0;
+
+async function tryReconnect() {
+  if (!pool) return;
+  try {
+    const testClient = await pool.connect();
+    await testClient.query('SELECT 1');
+    testClient.release();
+    await initTables();
+    if (useMem) {
+      console.log('✅ 数据库连接已恢复，切换回 PostgreSQL 持久化存储');
+      useMem = false;
+    }
+    reconnectAttempts = 0;
+    reconnectTimer = null;
+    startHealthCheck();
+  } catch (e) {
+    reconnectAttempts++;
+    // 指数退避：30s 起，最长 5 分钟
+    const delay = Math.min(30000 * Math.pow(1.5, Math.min(reconnectAttempts, 8)), 300000);
+    console.warn(`⚠️ 数据库重连失败(第${reconnectAttempts}次)，${Math.round(delay / 1000)}秒后重试: ${e.message}`);
+    reconnectTimer = setTimeout(() => { reconnectTimer = null; tryReconnect(); }, delay);
+    if (reconnectTimer.unref) reconnectTimer.unref();
+  }
+}
+
+function scheduleReconnect(delayMs) {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; tryReconnect(); }, delayMs || 30000);
+  if (reconnectTimer.unref) reconnectTimer.unref();
+}
+
+function startHealthCheck() {
+  if (healthCheckTimer) return;
+  healthCheckTimer = setInterval(async () => {
+    if (useMem || !pool) return;
+    try {
+      const c = await pool.connect();
+      await c.query('SELECT 1');
+      c.release();
+    } catch (e) {
+      console.error('⚠️ 数据库健康检查失败，切换到内存模式并尝试重连:', e.message);
+      useMem = true;
+      scheduleReconnect(15000);
+    }
+  }, 60000);
+  if (healthCheckTimer.unref) healthCheckTimer.unref();
+}
+
+export function isUsingMemoryStorage() { return useMem; }
+
 export async function initDB() {
   initPostgres();
   const isProduction = process.env.NODE_ENV === 'production';
-  
+
   if (!pool) {
     if (isProduction) {
       console.error('❌ FATAL: DATABASE_URL is NOT set in production environment!');
@@ -67,25 +120,26 @@ export async function initDB() {
     useMem = true;
     return;
   }
-  
+
   try {
     const testClient = await pool.connect();
     await testClient.query('SELECT 1');
     testClient.release();
     console.log('✅ Database connection verified successfully');
   } catch (err) {
-    console.error('❌ FATAL: Failed to connect to database:', err.message);
-    if (isProduction) {
-      process.exit(1);
-    }
-    console.log('⚠️  Falling back to in-memory storage for local dev...');
+    // 数据库不可用（如 CockroachDB 免费额度用尽被禁用）时绝不让进程退出：
+    // 降级为内存模式保持 API 可用，并自动定时重连，数据库恢复后自动切回
+    console.error('⚠️ 数据库连接失败:', err.message);
+    console.error('   服务将以内存模式继续运行（数据临时不持久化），并自动重试连接数据库。');
     useMem = true;
+    scheduleReconnect(30000);
     return;
   }
-  
+
   useMem = false;
   console.log('📦 Using CockroachDB/PostgreSQL database');
   await initTables();
+  startHealthCheck();
 }
 
 export async function getUsers() { return useMem ? [...memUsers] : pgGetUsers(); }
