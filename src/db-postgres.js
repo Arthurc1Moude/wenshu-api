@@ -581,12 +581,12 @@ function rowToActivity(row) {
     cover: row.cover,
     description: row.description,
     hashtag: row.hashtag,
-    rewardCoins: row.reward_coins,
-    participantCount: row.participant_count,
+    rewardCoins: Number(row.reward_coins) || 0,
+    participantCount: Number(row.participant_count) || 0,
     participants: row.participants || [],
     status: row.status,
-    startDate: row.start_date,
-    endDate: row.end_date,
+    startDate: row.start_date ? Number(row.start_date) : 0,
+    endDate: row.end_date ? Number(row.end_date) : 0,
     rules: row.rules || [],
   };
 }
@@ -1191,7 +1191,7 @@ export async function pgGetTips() {
     fromUserId: r.from_user_id,
     postId: r.post_id,
     toUserId: r.to_user_id,
-    amount: r.amount || 0,
+    amount: Number(r.amount) || 0,
     createdAt: Math.floor(Number(r.created_at) || Date.now())
   }));
 }

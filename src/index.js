@@ -702,7 +702,7 @@ app.post('/api/coin/signin', async (req, res) => {
     const yesterday = new Date(Date.now() - 86400000);
     const yesterdayStr = `${yesterday.getFullYear()}-${yesterday.getMonth() + 1}-${yesterday.getDate()}`;
     if (user.lastSignInDate === yesterdayStr) {
-      user.consecutiveSignDays = (user.consecutiveSignDays || 0) + 1;
+      user.consecutiveSignDays = Number(user.consecutiveSignDays || 0) + 1;
     } else {
       user.consecutiveSignDays = 1;
     }
@@ -1351,10 +1351,10 @@ app.post('/api/comments/:id/like', async (req, res) => {
     let isLiked = false;
     if (alreadyLiked) {
       await removeCommentLike(comment.id, userId);
-      comment.likeCount = Math.max(0, (comment.likeCount || 0) - 1);
+      comment.likeCount = Math.max(0, Number(comment.likeCount || 0) - 1);
     } else {
       await addCommentLike({ id: genId('clike'), commentId: comment.id, userId, createdAt: Date.now() });
-      comment.likeCount = (comment.likeCount || 0) + 1;
+      comment.likeCount = Number(comment.likeCount || 0) + 1;
       isLiked = true;
       if (comment.authorId !== userId) {
         await createNotification(comment.authorId, 'comment_like', '赞了你的评论', userId, comment.postId, comment.id);
@@ -3560,7 +3560,7 @@ app.post('/api/groups/join', async (req, res) => {
     }
     if (await isGroupMember(group.id, userId)) return res.json({ ...group, alreadyJoined: true });
     await addGroupMember({ id: genId('gm'), groupId: group.id, userId, role: 'member', joinedAt: Date.now() });
-    group.memberCount = (group.memberCount || 1) + 1;
+    group.memberCount = Number(group.memberCount || 1) + 1;
     await saveGroupChat(group);
     const convs = await getConversations();
     let conv = convs.find(c => c.id === group.id);
@@ -3650,7 +3650,7 @@ app.post('/api/groups/:id/leave', async (req, res) => {
     if (!group) return res.status(404).json({ error: '群聊不存在' });
     if (group.ownerId === userId) return res.status(400).json({ error: '群主不能退群，请先转让群' });
     await removeGroupMember(group.id, userId);
-    group.memberCount = Math.max(1, (group.memberCount || 1) - 1);
+    group.memberCount = Math.max(1, Number(group.memberCount || 1) - 1);
     await saveGroupChat(group);
     res.json({ ok: true });
   } catch (e) {
@@ -3701,7 +3701,7 @@ app.post('/api/groups/:id/members/:userId/remove', async (req, res) => {
       return res.status(403).json({ error: '管理员不能移除其他管理员' });
     }
     await removeGroupMember(group.id, targetId);
-    group.memberCount = Math.max(1, (group.memberCount || 1) - 1);
+    group.memberCount = Math.max(1, Number(group.memberCount || 1) - 1);
     await saveGroupChat(group);
     res.json({ ok: true });
   } catch (e) {
@@ -4157,7 +4157,7 @@ async function startServer() {
     const books = await getBooks();
     const i = books.findIndex(b => b.id === req.params.id);
     if (i < 0) return res.status(404).json({ error: '图书不存在' });
-    books[i].readCount = (books[i].readCount || 0) + 1;
+    books[i].readCount = Number(books[i].readCount || 0) + 1;
     await saveBook(books[i]);
     res.json({ success: true });
   });
@@ -4223,7 +4223,7 @@ async function startServer() {
     const games = await getGames();
     const i = games.findIndex(g => g.id === req.params.id);
     if (i < 0) return res.status(404).json({ error: '游戏不存在' });
-    games[i].plays = (games[i].plays || 0) + 1;
+    games[i].plays = Number(games[i].plays || 0) + 1;
     await saveGame(games[i]);
     res.json({ success: true });
   });
