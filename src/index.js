@@ -537,9 +537,17 @@ app.post('/api/auth/register', async (req, res) => {
     const color = avatarColors[Math.floor(Math.random() * avatarColors.length)];
     const avatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=${color}&color=fff&size=200&bold=true`;
 
+    // 自动生成不重复的随机昵称：用户XXXXXXXX
+    const usedNames = new Set(users.map(u => u.displayName).filter(Boolean));
+    let displayName;
+    do {
+      displayName = '用户' + String(Math.floor(10000000 + Math.random() * 90000000));
+    } while (usedNames.has(displayName));
+
     const user = {
       id: genId('user'),
       username,
+      displayName,
       password,
       phone: phone || null,
       avatar,
@@ -1399,8 +1407,19 @@ app.post('/api/comments/:id/pin', async (req, res) => {
     const post = posts.find(p => p.id === comment.postId);
     if (!post) return res.status(404).json({ error: '帖子不存在' });
     if (post.authorId !== userId) return res.status(403).json({ error: '只有帖子作者可以置顶评论' });
-    comment.isPinned = !!(req.body && req.body.pinned);
+    const pinned = !!(req.body && req.body.pinned);
+    const wasPinned = !!comment.isPinned;
+    comment.isPinned = pinned;
     await saveComment(comment);
+    // 置顶时通知评论作者（取消置顶不通知；操作自己的评论不通知）
+    if (pinned && !wasPinned && comment.authorId && comment.authorId !== userId) {
+      const postTitle = post.title || (post.content ? String(post.content).slice(0, 20) : '');
+      await createNotification(
+        comment.authorId, 'comment_pin',
+        '你的评论被作者置顶' + (postTitle ? '：' + postTitle : ''),
+        userId, comment.postId, comment.id
+      );
+    }
     res.json({ id: comment.id, isPinned: comment.isPinned });
   } catch (e) {
     console.error('Comment pin error:', e);
@@ -1495,6 +1514,21 @@ app.post('/api/groups/:id/activities', async (req, res) => {
       createdAt: Date.now()
     };
     await saveGroupActivity(activity);
+    // 通知全体群成员
+    try {
+      const gaMembers = await getGroupMembers(req.params.id);
+      const group = await getGroupChatById(req.params.id);
+      const groupName = group && group.name ? group.name : '群聊';
+      const verb = kind === 'homework' ? '布置了新作业' : (kind === 'form' ? '发起了新表格' : '发起了新接龙');
+      const notifContent = '群「' + groupName + '」' + verb + '：' + activity.title;
+      for (const gm of gaMembers) {
+        if (gm.userId && gm.userId !== userId) {
+          await createNotification(gm.userId, 'group_activity', notifContent, userId, null, null, {
+            activityId: activity.id, groupId: activity.groupId, kind: activity.kind
+          });
+        }
+      }
+    } catch (ne) { console.warn('Group activity notify failed (non-fatal):', ne.message); }
     res.json(activity);
   } catch (e) {
     console.error('Create group activity error:', e);
@@ -1564,6 +1598,16 @@ app.post('/api/group-activities/:aid/entries', async (req, res) => {
       if (idx >= 0) activity.entries[idx] = entry; else activity.entries.push(entry);
     }
     await saveGroupActivity(activity);
+    // 作业提交后通知布置者
+    if (activity.kind === 'homework' && activity.creatorId && activity.creatorId !== userId) {
+      try {
+        await createNotification(
+          activity.creatorId, 'group_activity',
+          (me ? (me.displayName || me.username || '有成员') : '有成员') + ' 提交了作业：' + activity.title,
+          userId, null, null, { activityId: activity.id, groupId: activity.groupId, kind: 'homework' }
+        );
+      } catch (ne) { console.warn('Homework submit notify failed (non-fatal):', ne.message); }
+    }
     res.json(activity);
   } catch (e) {
     console.error('Group activity entry error:', e);
@@ -3946,6 +3990,14 @@ app.post('/api/groups/:id/members/:userId/role', async (req, res) => {
     if (!members.find(m => m.userId === targetId)) return res.status(404).json({ error: '该成员不在群中' });
     const role = req.body && req.body.role === 'admin' ? 'admin' : 'member';
     await setGroupMemberRole(group.id, targetId, role);
+    try {
+      const content = role === 'admin'
+        ? '你已被设为群「' + group.name + '」的管理员'
+        : '你已被取消群「' + group.name + '」的管理员身份';
+      await createNotification(targetId, 'group_role', content, operatorId, null, null, {
+        groupId: group.id, role: role
+      });
+    } catch (ne) { console.warn('Group role notify failed (non-fatal):', ne.message); }
     res.json({ ok: true, role });
   } catch (e) {
     console.error('Set member role error:', e);
