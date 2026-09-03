@@ -2451,7 +2451,10 @@ app.post('/api/upload/file', uploadMemory.single('file'), async (req, res) => {
     }
 
     const result = await uploadFile(req.file.buffer, req.file.originalname, req.file.mimetype);
-    const expiry = calculateFileExpiry(req.file.mimetype, user);
+    const permanentOverrideFile = req.body && req.body.purpose === 'chat';
+    const expiry = permanentOverrideFile
+      ? { isPermanent: true, expireDays: null, expiresAt: null, deleteAt: null }
+      : calculateFileExpiry(req.file.mimetype, user);
 
     const fileRecord = {
       id: genId('file'),
