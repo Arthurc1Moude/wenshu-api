@@ -1527,56 +1527,96 @@ app.post('/api/conversations/:id/messages', async (req, res) => {
     const userId = getUserId(req);
     if (!userId) return res.status(401).json({ error: '未登录' });
     const { content } = req.body;
-    if (!content || !content.trim()) return res.status(400).json({ error: '消息不能为空' });
+    const msgType = ['text', 'image', 'file', 'system', 'poke'].includes(req.body.type) ? req.body.type : 'text';
+    const attachmentUrl = (req.body.attachmentUrl || '').trim();
+    const attachmentName = (req.body.attachmentName || '').trim();
+    const targetUserId = (req.body.targetUserId || '').trim();
+    const targetUserIds = Array.isArray(req.body.targetUserIds) ? req.body.targetUserIds.map(String).filter(Boolean) : [];
+
     const users = await getUsers();
     const sender = users.find(u => u.id === userId);
     const convs = await getConversations();
     const conv = convs.find(c => c.id === req.params.id);
     if (!conv) return res.status(404).json({ error: '会话不存在' });
+    if (!conv.participantIds.includes(userId)) return res.status(403).json({ error: '你不在该会话中' });
+
+    const senderName = sender?.displayName || sender?.username || '用户';
+    const nameOf = (uid) => { const u = users.find(x => x.id === uid); return u?.displayName || u?.username || '用户'; };
+
+    let finalContent = (content || '').trim();
+    if (msgType === 'image' || msgType === 'file') {
+      if (!attachmentUrl) return res.status(400).json({ error: '附件缺失' });
+      if (!finalContent) finalContent = msgType === 'image' ? '[图片]' : '[文件]';
+    } else if (msgType === 'poke') {
+      const targets = conv.type === 'group' ? targetUserIds : (targetUserId ? [targetUserId] : []);
+      const validTargets = targets.filter(t => conv.participantIds.includes(t) && t !== userId);
+      if (validTargets.length === 0) return res.status(400).json({ error: '戳一戳对象无效' });
+      finalContent = `${senderName} 戳了戳 ${validTargets.map(nameOf).join('、')}`;
+      var pokeTargets = validTargets;
+    } else {
+      if (!finalContent) return res.status(400).json({ error: '消息不能为空' });
+    }
 
     const msg = {
       id: genId('msg'),
       conversationId: req.params.id,
       senderId: userId,
-      content: content.trim(),
+      content: finalContent,
       createdAt: Date.now(),
-      read: false
+      read: false,
+      type: msgType,
+      attachmentUrl,
+      attachmentName,
+      targetUserId,
+      targetUserIds: msgType === 'poke' ? (pokeTargets || []) : []
     };
     await saveMessage(msg);
-    conv.lastMessage = content.trim();
+
+    const preview = msgType === 'image' ? '[图片]'
+      : msgType === 'file' ? '[文件]'
+      : msgType === 'poke' ? finalContent
+      : finalContent;
+    conv.lastMessage = preview;
     conv.lastMessageTime = Date.now();
     await saveConversation(conv);
 
-    const senderName = sender?.displayName || sender?.username || '用户';
+    const notifyTargets = msgType === 'poke'
+      ? (pokeTargets || [])
+      : conv.participantIds.filter(id => id !== userId);
+
     if (conv.type === 'private') {
-      const recipientId = conv.participantIds.find(id => id !== userId);
+      const recipientId = notifyTargets[0] || conv.participantIds.find(id => id !== userId);
       if (recipientId) {
-        await createNotification(recipientId, 'chat', content.trim(), userId, null, null, {
+        await createNotification(recipientId, msgType === 'poke' ? 'poke' : 'chat',
+          msgType === 'poke' ? `${senderName} 戳了戳你` : finalContent,
+          userId, null, null, {
           conversationId: conv.id,
           senderName: senderName,
           senderAvatar: sender?.avatar,
-          messageType: 'private'
+          messageType: 'private',
+          isPoke: msgType === 'poke'
         });
       }
     } else if (conv.type === 'group') {
       const groupName = conv.name || '群聊';
-      for (const pid of conv.participantIds) {
-        if (pid !== userId) {
-          await createNotification(pid, 'chat', `${senderName}: ${content.trim()}`, userId, null, null, {
-            conversationId: conv.id,
-            groupName: groupName,
-            groupAvatar: conv.avatar,
-            senderName: senderName,
-            senderAvatar: sender?.avatar,
-            messageType: 'group'
-          });
-        }
+      for (const pid of notifyTargets) {
+        await createNotification(pid, msgType === 'poke' ? 'poke' : 'chat',
+          msgType === 'poke' ? `${senderName} 在群聊中戳了戳你` : `${senderName}: ${preview}`,
+          userId, null, null, {
+          conversationId: conv.id,
+          groupName: groupName,
+          groupAvatar: conv.avatar,
+          senderName: senderName,
+          senderAvatar: sender?.avatar,
+          messageType: 'group',
+          isPoke: msgType === 'poke'
+        });
       }
     }
 
     res.json({
       ...msg,
-      senderName: sender?.username,
+      senderName: sender?.displayName || sender?.username,
       senderAvatar: sender?.avatar,
       sender: sender ? getUserPublic(sender) : null,
     });
@@ -2281,7 +2321,10 @@ app.post('/api/upload', uploadMemory.any(), async (req, res) => {
     }
 
     const result = await uploadFile(uploadedFile.buffer, uploadedFile.originalname, uploadedFile.mimetype);
-    const expiry = calculateFileExpiry(uploadedFile.mimetype, user);
+    const chatPermanentOverride = req.body && req.body.purpose === 'chat';
+    const expiry = chatPermanentOverride
+      ? { isPermanent: true, expireDays: null, expiresAt: null, deleteAt: null }
+      : calculateFileExpiry(uploadedFile.mimetype, user);
 
     const fileRecord = {
       id: genId('file'),
@@ -2343,7 +2386,10 @@ app.post('/api/upload/image', uploadMemory.single('file'), async (req, res) => {
     }
 
     const result = await uploadFile(req.file.buffer, req.file.originalname, req.file.mimetype);
-    const expiry = calculateFileExpiry(req.file.mimetype, user);
+    const permanentOverride = req.body && req.body.purpose === 'chat';
+    const expiry = permanentOverride
+      ? { isPermanent: true, expireDays: null, expiresAt: null, deleteAt: null }
+      : calculateFileExpiry(req.file.mimetype, user);
 
     const fileRecord = {
       id: genId('file'),

@@ -159,6 +159,13 @@ export async function initTables() {
       )
     `);
 
+    // 消息类型扩展（图片/文件/系统/戳一戳）
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS type TEXT DEFAULT 'text'`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_url TEXT DEFAULT ''`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS attachment_name TEXT DEFAULT ''`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS target_user_id TEXT DEFAULT ''`);
+    await client.query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS target_user_ids TEXT DEFAULT ''`);
+
     await client.query(`
       CREATE TABLE IF NOT EXISTS activities (
         id TEXT PRIMARY KEY,
@@ -542,6 +549,11 @@ function rowToMessage(row) {
     senderId: row.sender_id,
     content: row.content,
     read: row.read,
+    type: row.type || 'text',
+    attachmentUrl: row.attachment_url || '',
+    attachmentName: row.attachment_name || '',
+    targetUserId: row.target_user_id || '',
+    targetUserIds: row.target_user_ids ? String(row.target_user_ids).split(',').filter(Boolean) : [],
     createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
 }
@@ -752,10 +764,14 @@ export async function pgGetMessages() {
 
 export async function pgSaveMessage(msg) {
   await pool.query(`
-    INSERT INTO messages (id, conversation_id, sender_id, content, read, created_at)
-    VALUES ($1,$2,$3,$4,$5,$6)
-    ON CONFLICT (id) DO UPDATE SET read = EXCLUDED.read
-  `, [msg.id, msg.conversationId, msg.senderId, msg.content, msg.read || false, msg.createdAt]);
+    INSERT INTO messages (id, conversation_id, sender_id, content, read, created_at, type, attachment_url, attachment_name, target_user_id, target_user_ids)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    ON CONFLICT (id) DO UPDATE SET read = EXCLUDED.read,
+      type = EXCLUDED.type, attachment_url = EXCLUDED.attachment_url, attachment_name = EXCLUDED.attachment_name,
+      target_user_id = EXCLUDED.target_user_id, target_user_ids = EXCLUDED.target_user_ids
+  `, [msg.id, msg.conversationId, msg.senderId, msg.content, msg.read || false, msg.createdAt,
+      msg.type || 'text', msg.attachmentUrl || '', msg.attachmentName || '',
+      msg.targetUserId || '', Array.isArray(msg.targetUserIds) ? msg.targetUserIds.join(',') : (msg.targetUserIds || '')]);
 }
 
 export async function pgMarkMessagesRead(conversationId, userId) {
