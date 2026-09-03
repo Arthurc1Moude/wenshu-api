@@ -19,6 +19,7 @@ import {
   pgGetCommentLikes, pgAddCommentLike, pgDeleteCommentLike, pgGetCommentLikeCount, pgIsCommentLikedByUser,
   pgGetGroupChats, pgGetGroupChatById, pgGetGroupChatByNumber, pgSaveGroupChat,
   pgGetGroupMembers, pgGetUserGroups, pgAddGroupMember, pgRemoveGroupMember, pgSetGroupMemberRole, pgIsGroupMember, pgGenerateGroupNumber,
+  pgGetRedPackets, pgGetRedPacketById, pgSaveRedPacket,
   pgSaveFile, pgGetFileById, pgGetFilesByPost, pgGetFilesByUploader, pgGetAllFiles, pgDeleteFile,
   pgIncrementFileDownload, pgGetExpiredFiles, pgGetUserTotalStorage,
   pgSaveUrlPreview, pgGetUrlPreview,
@@ -42,6 +43,7 @@ let memBlacklists = [];
 let memCommentLikes = [];
 let memGroupChats = [];
 let memGroupMembers = [];
+let memRedPackets = [];
 let memRegisterCount = 0;
 let memVerifCodes = [];
 let memTips = [];
@@ -368,6 +370,20 @@ export async function generateGroupNumber() {
     return Math.floor(1000000 + Math.random() * 9000000).toString();
   }
   return pgGenerateGroupNumber();
+}
+
+export async function getRedPackets() { return useMem ? [...memRedPackets] : pgGetRedPackets(); }
+export async function getRedPacketById(id) {
+  if (useMem) return memRedPackets.find(p => p.id === id) || null;
+  return pgGetRedPacketById(id);
+}
+export async function saveRedPacket(p) {
+  if (useMem) {
+    const i = memRedPackets.findIndex(x => x.id === p.id);
+    if (i >= 0) memRedPackets[i] = { ...memRedPackets[i], ...p }; else memRedPackets.push(p);
+    return p;
+  }
+  return pgSaveRedPacket(p);
 }
 
 export async function getTips() { return useMem ? [...memTips] : pgGetTips(); }

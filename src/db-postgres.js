@@ -261,6 +261,21 @@ export async function initTables() {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS red_packets (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL,
+        sender_id TEXT NOT NULL,
+        total_amount INTEGER NOT NULL,
+        remaining_amount INTEGER NOT NULL,
+        count INTEGER NOT NULL,
+        grab_type TEXT DEFAULT 'random',
+        grabs JSONB DEFAULT '[]'::jsonb,
+        refunded BOOLEAN DEFAULT false,
+        created_at BIGINT
+      )
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS group_members (
         id TEXT PRIMARY KEY,
         group_id TEXT NOT NULL,
@@ -432,7 +447,7 @@ function rowToUser(row) {
     isVip: row.is_vip || false,
     vipLevel: Number(row.vip_level || 0),
     vipExp: Number(row.vip_exp || 0),
-    vipExpiresAt: row.vip_expires_at,
+    vipExpiresAt: row.vip_expires_at ? Number(row.vip_expires_at) : null,
     followingCount: Number(row.following_count || 0),
     followersCount: Number(row.followers_count || 0),
     likesCount: Number(row.likes_count || 0),
@@ -471,10 +486,10 @@ function rowToPost(row) {
     videos: parseJsonb(row.videos, []),
     files: parseJsonb(row.files, []),
     tags: parseJsonb(row.tags, []),
-    likeCount: row.like_count || 0,
-    commentCount: row.comment_count || 0,
-    collectCount: row.collect_count || 0,
-    coinCount: row.coin_count || 0,
+    likeCount: Number(row.like_count) || 0,
+    commentCount: Number(row.comment_count) || 0,
+    collectCount: Number(row.collect_count) || 0,
+    coinCount: Number(row.coin_count) || 0,
     tippedBy: parseJsonb(row.tipped_by, []),
     location: row.location || '',
     isLongPost: row.is_long_post || false,
@@ -490,7 +505,7 @@ function rowToComment(row) {
     postId: row.post_id,
     authorId: row.author_id,
     content: row.content,
-    likeCount: row.like_count || 0,
+    likeCount: Number(row.like_count) || 0,
     replyToId: row.reply_to_id,
     createdAt: Math.floor(Number(row.created_at) || Date.now()),
   };
@@ -580,10 +595,10 @@ function rowToRedeemCode(row) {
   if (!row) return null;
   return {
     code: row.code,
-    coinValue: row.coin_value,
+    coinValue: Number(row.coin_value) || 0,
     rewardType: row.reward_type,
     description: row.description,
-    validUntil: row.valid_until,
+    validUntil: row.valid_until ? Number(row.valid_until) : 0,
     usedBy: row.used_by || [],
   };
 }
@@ -594,9 +609,9 @@ function rowToRedeemRecord(row) {
     id: row.id,
     userId: row.user_id,
     code: row.code,
-    coinValue: row.coin_value,
+    coinValue: Number(row.coin_value) || 0,
     rewardType: row.reward_type,
-    redeemedAt: row.redeemed_at,
+    redeemedAt: row.redeemed_at ? Number(row.redeemed_at) : 0,
   };
 }
 
@@ -606,7 +621,7 @@ function rowToBlacklist(row) {
     id: row.id,
     userId: row.user_id,
     blockedUserId: row.blocked_user_id,
-    createdAt: row.created_at,
+    createdAt: row.created_at ? Number(row.created_at) : Date.now(),
   };
 }
 
@@ -907,11 +922,11 @@ function rowToGroupChat(row) {
     avatar: row.avatar,
     ownerId: row.owner_id,
     joinCode: row.join_code,
-    joinCodeExpiresAt: row.join_code_expires_at,
+    joinCodeExpiresAt: row.join_code_expires_at ? Number(row.join_code_expires_at) : null,
     lastMessage: row.last_message || '',
-    lastMessageTime: row.last_message_time,
-    memberCount: row.member_count || 1,
-    createdAt: row.created_at
+    lastMessageTime: row.last_message_time ? Number(row.last_message_time) : null,
+    memberCount: Number(row.member_count) || 1,
+    createdAt: row.created_at ? Number(row.created_at) : Date.now()
   };
 }
 
@@ -922,8 +937,47 @@ function rowToGroupMember(row) {
     groupId: row.group_id,
     userId: row.user_id,
     role: row.role || 'member',
-    joinedAt: row.joined_at
+    joinedAt: row.joined_at ? Number(row.joined_at) : null
   };
+}
+
+function rowToRedPacket(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    conversationId: row.conversation_id,
+    senderId: row.sender_id,
+    totalAmount: Number(row.total_amount) || 0,
+    remainingAmount: Number(row.remaining_amount) || 0,
+    count: Number(row.count) || 0,
+    grabType: row.grab_type || 'random',
+    grabs: parseJsonb(row.grabs, []),
+    refunded: row.refunded || false,
+    createdAt: row.created_at ? Number(row.created_at) : Date.now()
+  };
+}
+
+export async function pgGetRedPackets() {
+  const res = await pool.query('SELECT * FROM red_packets');
+  return res.rows.map(rowToRedPacket);
+}
+
+export async function pgGetRedPacketById(id) {
+  const res = await pool.query('SELECT * FROM red_packets WHERE id = $1', [id]);
+  if (res.rows.length === 0) return null;
+  return rowToRedPacket(res.rows[0]);
+}
+
+export async function pgSaveRedPacket(p) {
+  await pool.query(`
+    INSERT INTO red_packets (id, conversation_id, sender_id, total_amount, remaining_amount, count, grab_type, grabs, refunded, created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    ON CONFLICT (id) DO UPDATE SET
+      remaining_amount = EXCLUDED.remaining_amount,
+      grabs = EXCLUDED.grabs,
+      refunded = EXCLUDED.refunded
+  `, [p.id, p.conversationId, p.senderId, p.totalAmount, p.remainingAmount, p.count,
+       p.grabType || 'random', JSON.stringify(p.grabs || []), !!p.refunded, p.createdAt || Date.now()]);
 }
 
 export async function pgGetCommentLikes() {

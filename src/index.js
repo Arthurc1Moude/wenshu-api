@@ -29,6 +29,7 @@ import {
   getGroupChats, getGroupChatById, getGroupChatByNumber, saveGroupChat,
   getGroupMembers, getUserGroups, addGroupMember, removeGroupMember, setGroupMemberRole, isGroupMember, generateGroupNumber,
   getTips, addTip,
+  getRedPackets, getRedPacketById, saveRedPacket,
   isUsingMemoryStorage
 } from './db.js';
 
@@ -1156,7 +1157,8 @@ app.post('/api/posts/:id/tip', async (req, res) => {
     const post = posts[idx];
     if (post.authorId === userId) return res.status(400).json({ error: '不能给自己的帖子投币' });
 
-    const amount = req.body?.amount && Number.isInteger(req.body.amount) && req.body.amount > 0 ? req.body.amount : 10;
+    const amountRaw = Number(req.body?.amount);
+    const amount = Number.isInteger(amountRaw) && amountRaw > 0 ? amountRaw : 10;
     if (amount < 1) return res.status(400).json({ error: '投币数量至少为1' });
     if ((me.wenshuCoin || 0) < amount) {
       return res.status(400).json({ error: '文书币不足', code: 'INSUFFICIENT_COINS' });
@@ -2649,18 +2651,20 @@ app.post('/api/admin/reward/:userId', async (req, res) => {
     const adminCheck = await requireAdmin(userId);
     if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
     const targetId = req.params.userId;
-    const { coins, vipDays, reason } = req.body;
+    const coins = Math.floor(Number(req.body.coins)) || 0;
+    const vipDays = Math.floor(Number(req.body.vipDays)) || 0;
+    const reason = req.body.reason;
     const users = await getUsers();
     const target = users.find(u => u.id === targetId);
     if (!target) return res.status(404).json({ error: '用户不存在' });
     const parts = [];
-    if (coins && coins > 0) {
+    if (coins > 0) {
       target.wenshuCoin = Number(target.wenshuCoin || 0) + coins;
       parts.push(`${coins}文书币`);
     }
-    if (vipDays && vipDays > 0) {
-      if (target.isVip) {
-        target.vipExpiresAt = (target.vipExpiresAt || Date.now()) + vipDays * 86400000;
+    if (vipDays > 0) {
+      if (target.isVip && Number(target.vipExpiresAt) > Date.now()) {
+        target.vipExpiresAt = Number(target.vipExpiresAt || Date.now()) + vipDays * 86400000;
       } else {
         target.isVip = true;
         target.vipLevel = 1;
@@ -2778,17 +2782,20 @@ app.put('/api/admin/users/:userId', async (req, res) => {
     const users = await getUsers();
     const target = users.find(u => u.id === targetId);
     if (!target) return res.status(404).json({ error: '用户不存在' });
-    const { displayName, wenshuCoin, isVip, vipDays, isAdmin } = req.body;
+    const { displayName, isVip, isAdmin } = req.body;
+    const wenshuCoin = req.body.wenshuCoin !== undefined && req.body.wenshuCoin !== null && !isNaN(Number(req.body.wenshuCoin))
+      ? Math.floor(Number(req.body.wenshuCoin)) : undefined;
+    const vipDays = Math.floor(Number(req.body.vipDays)) || 0;
     if (displayName !== undefined) target.displayName = displayName;
-    if (wenshuCoin !== undefined) target.wenshuCoin = wenshuCoin;
+    if (wenshuCoin !== undefined) target.wenshuCoin = Math.max(0, wenshuCoin);
     if (isAdmin !== undefined) target.isAdmin = isAdmin;
     if (isVip !== undefined) {
       target.isVip = isVip;
       if (isVip && !target.vipLevel) target.vipLevel = 1;
     }
-    if (vipDays !== undefined && vipDays > 0) {
-      if (target.vipExpiresAt && target.vipExpiresAt > Date.now()) {
-        target.vipExpiresAt = target.vipExpiresAt + vipDays * 86400000;
+    if (vipDays > 0) {
+      if (Number(target.vipExpiresAt) > Date.now()) {
+        target.vipExpiresAt = Number(target.vipExpiresAt) + vipDays * 86400000;
       } else {
         target.isVip = true;
         if (!target.vipLevel) target.vipLevel = 1;
@@ -2852,18 +2859,20 @@ app.post('/api/admin/reward-all', async (req, res) => {
     const userId = getUserId(req);
     const adminCheck = await requireAdmin(userId);
     if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
-    const { coins, vipDays, reason } = req.body;
+    const coins = Math.floor(Number(req.body.coins)) || 0;
+    const vipDays = Math.floor(Number(req.body.vipDays)) || 0;
+    const reason = req.body.reason;
     const users = await getUsers();
     const parts = [];
     let rewardedCount = 0;
     for (const user of users) {
       if (user.isAdmin) continue;
-      if (coins && coins > 0) {
+      if (coins > 0) {
         user.wenshuCoin = Number(user.wenshuCoin || 0) + coins;
       }
-      if (vipDays && vipDays > 0) {
-        if (user.vipExpiresAt && user.vipExpiresAt > Date.now()) {
-          user.vipExpiresAt = user.vipExpiresAt + vipDays * 86400000;
+      if (vipDays > 0) {
+        if (Number(user.vipExpiresAt) > Date.now()) {
+          user.vipExpiresAt = Number(user.vipExpiresAt) + vipDays * 86400000;
         } else {
           user.isVip = true;
           if (!user.vipLevel) user.vipLevel = 1;
@@ -2895,7 +2904,9 @@ app.post('/api/admin/create-user', async (req, res) => {
     const adminCheck = await requireAdmin(userId);
     if (adminCheck.error) return res.status(adminCheck.status).json({ error: adminCheck.error });
     
-    const { username, password, displayName, isAdmin, isVip, vipDays, wenshuCoin } = req.body;
+    const { username, password, displayName, isAdmin, isVip } = req.body;
+    const vipDays = Math.floor(Number(req.body.vipDays)) || 0;
+    const wenshuCoin = Math.floor(Number(req.body.wenshuCoin)) || 0;
     
     if (!username || !password) {
       return res.status(400).json({ error: '用户名和密码不能为空' });
@@ -3159,6 +3170,246 @@ app.post('/api/admin/activate-admin', async (req, res) => {
     res.json({ ok: true, message: '管理员账号已激活' });
   } catch (e) {
     console.error('Activate admin error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+
+// ---------------- 红包 ----------------
+
+function buildRedPacketDetail(packet, users, viewerId) {
+  const sender = users.find(u => u.id === packet.senderId);
+  const grabList = (packet.grabs || []).map(g => {
+    const u = users.find(x => x.id === g.userId);
+    return {
+      userId: g.userId,
+      username: u?.username || '',
+      displayName: u?.displayName || u?.username || '用户',
+      avatar: u?.avatar || null,
+      amount: Number(g.amount) || 0,
+      grabbedAt: Number(g.grabbedAt) || 0
+    };
+  }).sort((a, b) => a.grabbedAt - b.grabbedAt);
+  const luckiest = grabList.length > 0
+    ? grabList.reduce((best, g) => (g.amount > best.amount ? g : best), grabList[0])
+    : null;
+  const myGrab = grabList.find(g => g.userId === viewerId);
+  return {
+    id: packet.id,
+    conversationId: packet.conversationId,
+    senderId: packet.senderId,
+    senderName: sender?.displayName || sender?.username || '用户',
+    senderAvatar: sender?.avatar || null,
+    totalAmount: Number(packet.totalAmount) || 0,
+    remainingAmount: Number(packet.remainingAmount) || 0,
+    count: Number(packet.count) || 0,
+    grabType: packet.grabType || 'random',
+    status: packet.refunded ? 'refunded' : ((Number(packet.remainingAmount) || 0) <= 0 ? 'empty' : 'active'),
+    grabs: grabList,
+    myAmount: myGrab ? myGrab.amount : null,
+    luckiestUserId: luckiest ? luckiest.userId : null,
+    refunded: !!packet.refunded,
+    createdAt: Number(packet.createdAt) || 0
+  };
+}
+
+app.post('/api/red-packets', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const conversationId = String(req.body.conversationId || '').trim();
+    const amount = Math.floor(Number(req.body.amount));
+    const count = Math.floor(Number(req.body.count));
+    const grabType = req.body.type === 'equal' ? 'equal' : 'random';
+    if (!conversationId) return res.status(400).json({ error: '参数错误' });
+    if (!Number.isInteger(amount) || amount < 5 || amount > 20000) {
+      return res.status(400).json({ error: '红包总金额需在 5 ~ 20000 文书币之间' });
+    }
+    const convs = await getConversations();
+    const conv = convs.find(c => c.id === conversationId);
+    if (!conv) return res.status(404).json({ error: '会话不存在' });
+    if (!conv.participantIds.includes(userId)) return res.status(403).json({ error: '你不在该会话中' });
+    if (!Number.isInteger(count) || count < 1 || count > 100) {
+      return res.status(400).json({ error: '红包个数需在 1 ~ 100 之间' });
+    }
+    if (count > conv.participantIds.length) {
+      return res.status(400).json({ error: '红包个数不能超过会话人数' });
+    }
+    const users = await getUsers();
+    const sender = users.find(u => u.id === userId);
+    if (!sender) return res.status(404).json({ error: '用户不存在' });
+    if (Number(sender.wenshuCoin || 0) < amount) {
+      return res.status(400).json({ error: '文书币余额不足', code: 'INSUFFICIENT_COINS' });
+    }
+    sender.wenshuCoin = Number(sender.wenshuCoin || 0) - amount;
+    await saveUser(sender);
+
+    const packet = {
+      id: genId('rp'),
+      conversationId,
+      senderId: userId,
+      totalAmount: amount,
+      remainingAmount: amount,
+      count,
+      grabType,
+      grabs: [],
+      refunded: false,
+      createdAt: Date.now()
+    };
+    await saveRedPacket(packet);
+
+    const senderName = sender.displayName || sender.username || '用户';
+    const msg = {
+      id: genId('msg'),
+      conversationId,
+      senderId: userId,
+      content: '[红包]',
+      createdAt: Date.now(),
+      read: false,
+      type: 'redpacket',
+      attachmentUrl: packet.id,
+      attachmentName: grabType === 'equal' ? '普通红包' : '拼手气红包',
+      targetUserId: '',
+      targetUserIds: []
+    };
+    await saveMessage(msg);
+    conv.lastMessage = senderName + ' 发了一个红包';
+    conv.lastMessageTime = Date.now();
+    await saveConversation(conv);
+
+    for (const pid of conv.participantIds) {
+      if (pid === userId) continue;
+      try {
+        await createNotification(pid, 'redpacket', senderName + ' 发了一个红包，快来领取', userId, null, null, {
+          conversationId: conv.id,
+          senderName,
+          senderAvatar: sender.avatar
+        });
+      } catch (_) {}
+    }
+
+    res.json(buildRedPacketDetail(packet, users, userId));
+  } catch (e) {
+    console.error('Create red packet error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.post('/api/red-packets/:id/grab', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const packet = await getRedPacketById(req.params.id);
+    if (!packet) return res.status(404).json({ error: '红包不存在或已过期' });
+    const convs = await getConversations();
+    const conv = convs.find(c => c.id === packet.conversationId);
+    if (!conv || !conv.participantIds.includes(userId)) return res.status(403).json({ error: '你不在该会话中' });
+    if (packet.refunded) return res.status(400).json({ error: '该红包已过期退款' });
+    packet.grabs = packet.grabs || [];
+    let users = await getUsers();
+    if (packet.grabs.some(g => g.userId === userId)) {
+      return res.json(buildRedPacketDetail(packet, users, userId));
+    }
+    const total = Number(packet.totalAmount) || 0;
+    const remainingAmount = Number(packet.remainingAmount) || 0;
+    const remainingCount = Number(packet.count) - packet.grabs.length;
+    if (remainingAmount <= 0 || remainingCount <= 0) return res.status(400).json({ error: '红包已被领完' });
+
+    let grabAmount;
+    if (remainingCount === 1) {
+      grabAmount = remainingAmount;
+    } else if (packet.grabType === 'equal') {
+      const base = Math.floor(total / Number(packet.count));
+      const extra = packet.grabs.length < (total % Number(packet.count)) ? 1 : 0;
+      grabAmount = base + extra;
+    } else {
+      const avg = remainingAmount / remainingCount;
+      const maxPart = Math.max(1, Math.min(remainingAmount - (remainingCount - 1), Math.floor(avg * 2)));
+      grabAmount = 1 + Math.floor(Math.random() * maxPart);
+      grabAmount = Math.min(grabAmount, remainingAmount - (remainingCount - 1));
+    }
+    grabAmount = Math.max(1, Math.floor(grabAmount));
+
+    packet.grabs.push({ userId, amount: grabAmount, grabbedAt: Date.now() });
+    packet.remainingAmount = remainingAmount - grabAmount;
+    await saveRedPacket(packet);
+
+    users = await getUsers();
+    const grabber = users.find(u => u.id === userId);
+    if (grabber) {
+      grabber.wenshuCoin = Number(grabber.wenshuCoin || 0) + grabAmount;
+      await saveUser(grabber);
+    }
+    const sender = users.find(u => u.id === packet.senderId);
+    const senderName = sender?.displayName || sender?.username || '用户';
+    if (Number(packet.remainingAmount) <= 0) {
+      try {
+        const luckiest = packet.grabs.reduce((best, g) => (g.amount > best.amount ? g : best), packet.grabs[0]);
+        if (luckiest && luckiest.userId !== packet.senderId) {
+          await createNotification(luckiest.userId, 'redpacket',
+            '你是 ' + senderName + ' 的红包运气王，手气最佳获得 ' + luckiest.amount + ' 文书币',
+            packet.senderId, null, null, { conversationId: packet.conversationId });
+        }
+      } catch (_) {}
+    }
+    res.json(buildRedPacketDetail(packet, users, userId));
+  } catch (e) {
+    console.error('Grab red packet error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+app.get('/api/red-packets/:id', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const packet = await getRedPacketById(req.params.id);
+    if (!packet) return res.status(404).json({ error: '红包不存在' });
+    const convs = await getConversations();
+    const conv = convs.find(c => c.id === packet.conversationId);
+    if (!conv || !conv.participantIds.includes(userId)) return res.status(403).json({ error: '你不在该会话中' });
+    const users = await getUsers();
+    res.json(buildRedPacketDetail(packet, users, userId));
+  } catch (e) {
+    console.error('Grab red packet detail error:', e);
+    res.status(500).json({ error: '服务器错误' });
+  }
+});
+
+// 撤回消息（发送者本人，撤回后全员显示"XX 撤回了一条消息"）
+app.delete('/api/conversations/:id/messages/:msgId', async (req, res) => {
+  try {
+    const userId = getUserId(req);
+    if (!userId) return res.status(401).json({ error: '未登录' });
+    const messages = await getMessages();
+    const msg = messages.find(m => m.id === req.params.msgId && m.conversationId === req.params.id);
+    if (!msg) return res.status(404).json({ error: '消息不存在' });
+    if (msg.senderId !== userId) return res.status(403).json({ error: '只能撤回自己发送的消息' });
+    const users = await getUsers();
+    const sender = users.find(u => u.id === userId);
+    const senderName = sender?.displayName || sender?.username || '用户';
+    msg.type = 'system';
+    msg.content = senderName + ' 撤回了一条消息';
+    msg.attachmentUrl = '';
+    msg.attachmentName = '';
+    msg.targetUserId = '';
+    msg.targetUserIds = [];
+    await saveMessage(msg);
+
+    const convs = await getConversations();
+    const conv = convs.find(c => c.id === req.params.id);
+    if (conv) {
+      const convMsgs = messages.filter(m => m.conversationId === conv.id).sort((a, b) => a.createdAt - b.createdAt);
+      const last = convMsgs[convMsgs.length - 1];
+      if (last && last.id === msg.id) {
+        conv.lastMessage = msg.content;
+        conv.lastMessageTime = msg.createdAt;
+        await saveConversation(conv);
+      }
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('Recall message error:', e);
     res.status(500).json({ error: '服务器错误' });
   }
 });
@@ -4106,6 +4357,34 @@ async function startServer() {
   setInterval(() => {
     processAllVipExpiry();
   }, 60 * 60 * 1000);
+
+  // 红包 24 小时未领完自动退回
+  setInterval(async () => {
+    try {
+      const packets = await getRedPackets();
+      const users = await getUsers();
+      for (const p of packets) {
+        if (p.refunded) continue;
+        if ((Number(p.remainingAmount) || 0) > 0 && Date.now() - Number(p.createdAt) > 24 * 60 * 60 * 1000) {
+          const sender = users.find(u => u.id === p.senderId);
+          if (sender) {
+            sender.wenshuCoin = Number(sender.wenshuCoin || 0) + Number(p.remainingAmount);
+            await saveUser(sender);
+            try {
+              await createNotification(p.senderId, 'redpacket',
+                '你的红包24小时未被领完，剩余 ' + p.remainingAmount + ' 文书币已退回钱包',
+                null, null, null, {});
+            } catch (_) {}
+          }
+          p.refunded = true;
+          await saveRedPacket(p);
+          console.log('🧧 红包 ' + p.id + ' 剩余 ' + p.remainingAmount + ' 文书币已退回');
+        }
+      }
+    } catch (e) {
+      console.warn('Red packet refund sweep error:', e.message);
+    }
+  }, 30 * 60 * 1000);
 }
 
 startServer().catch(e => {
