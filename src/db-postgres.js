@@ -17,8 +17,15 @@ export function initPostgres() {
   pool = new Pool({
     connectionString,
     ssl: (process.env.DATABASE_URL.includes('cockroachlabs') || process.env.DATABASE_URL.includes('neon.tech') || process.env.DATABASE_URL.includes('render.com'))
-      ? { rejectUnauthorized: false } 
+      ? { rejectUnauthorized: false }
       : false,
+    // Neon/serverless scale-to-zero hardening: drop idle clients before the
+    // server closes them, fail fast on connect, and keep TCP connections alive.
+    max: 10,
+    idleTimeoutMillis: 60000,
+    connectionTimeoutMillis: 10000,
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10000,
   });
   pool.on('error', (err) => {
     console.error('Unexpected database error:', err);
@@ -712,7 +719,8 @@ export async function pgSavePost(post) {
     JSON.stringify(post.tags || []),
     post.likeCount || 0, post.commentCount || 0, post.collectCount || 0,
     post.coinCount || 0, JSON.stringify(post.tippedBy || []), post.location || '',
-    post.isLongPost || false, JSON.stringify(post.urlPreviews || []), post.createdAt
+    post.isLongPost || false, JSON.stringify(post.urlPreviews || []),
+    Math.floor(Number(post.createdAt)) || Date.now()
   ]);
 }
 

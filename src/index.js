@@ -4141,7 +4141,7 @@ app.post('/api/seed', async (req, res) => {
         likeCount,
         commentCount,
         collectCount,
-        createdAt: now - i * 3600000 * (Math.random() * 4 + 1)
+        createdAt: Math.floor(now - i * 3600000 * (Math.random() * 4 + 1))
       });
     }
     const allPosts = await getPosts();
@@ -4324,7 +4324,7 @@ async function startServer() {
     if (changed) await saveUser(adminUser);
   }
 
-  let assistantUser = users.find(u => u.username === '文书小助手' && u.id !== adminUser.id);
+  let assistantUser = users.find(u => u.username === '文书小助手_bot' || (u.username === '文书小助手' && u.id !== adminUser.id));
   if (!assistantUser) {
     assistantUser = {
       id: genId('bot'),
@@ -4428,7 +4428,7 @@ async function startServer() {
         likeCount: Math.floor(Math.random() * 200) + 10,
         commentCount: Math.floor(Math.random() * 30),
         collectCount: Math.floor(Math.random() * 50),
-        createdAt: now - i * 3600000 * (Math.random() * 4 + 1)
+        createdAt: Math.floor(now - i * 3600000 * (Math.random() * 4 + 1))
       });
     }
   }
