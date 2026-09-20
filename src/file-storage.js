@@ -4,15 +4,20 @@ import { v4 as uuidv4 } from 'uuid';
 
 let s3Client = null;
 let useS3 = false;
-const S3_BUCKET = process.env.S3_BUCKET || process.env.R2_BUCKET_NAME || '';
-const S3_ENDPOINT = process.env.S3_ENDPOINT || process.env.R2_ENDPOINT || '';
+// Env resolution order: explicit S3_* -> Cloudflare R2_* -> Neon-injected AWS_*
+// Neon Object Storage injects AWS-standard vars (AWS_ENDPOINT_URL_S3, AWS_REGION,
+// AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY); its branch-scoped endpoint requires
+// path-style addressing. Default bucket for Neon deployments is "uploads".
+const NEON_S3_ENDPOINT = process.env.AWS_ENDPOINT_URL_S3 || '';
+const S3_BUCKET = process.env.S3_BUCKET || process.env.R2_BUCKET_NAME || (NEON_S3_ENDPOINT ? (process.env.AWS_S3_BUCKET || 'uploads') : '');
+const S3_ENDPOINT = process.env.S3_ENDPOINT || process.env.R2_ENDPOINT || NEON_S3_ENDPOINT;
 const S3_PUBLIC_URL = process.env.S3_PUBLIC_URL || (S3_ENDPOINT && S3_BUCKET ? `${S3_ENDPOINT}/${S3_BUCKET}` : '');
 
 async function initS3() {
   if (useS3) return;
-  const accessKey = process.env.S3_ACCESS_KEY || process.env.R2_ACCESS_KEY_ID || '';
-  const secretKey = process.env.S3_SECRET_KEY || process.env.R2_SECRET_ACCESS_KEY || '';
-  const region = process.env.S3_REGION || 'auto';
+  const accessKey = process.env.S3_ACCESS_KEY || process.env.R2_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || '';
+  const secretKey = process.env.S3_SECRET_KEY || process.env.R2_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || '';
+  const region = process.env.S3_REGION || process.env.AWS_REGION || 'auto';
 
   if (!S3_BUCKET || !accessKey || !secretKey) {
     console.log('📁 No S3/R2 configured - using local file storage');
