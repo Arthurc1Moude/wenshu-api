@@ -9,16 +9,18 @@ export function initPostgres() {
     return null;
   }
   
-  let connectionString = process.env.DATABASE_URL;
-  if (connectionString.includes('sslmode=verify-full')) {
-    connectionString = connectionString.replace('sslmode=verify-full', 'sslmode=require');
-  }
+  const connectionString = process.env.DATABASE_URL;
   
-  pool = new Pool({
+  // TLS policy: let the sslmode parameter in DATABASE_URL govern verification.
+  // Neon, CockroachDB Cloud and Render managed Postgres present publicly-trusted
+  // certificates, so sslmode=verify-full (encryption + CA chain + hostname check)
+  // works and is the recommended setting. We deliberately do NOT force
+  // rejectUnauthorized:false, which silently disables certificate verification.
+  const cloudDbHost = connectionString.includes('cockroachlabs')
+    || connectionString.includes('neon.tech')
+    || connectionString.includes('render.com');
+  const poolConfig = {
     connectionString,
-    ssl: (process.env.DATABASE_URL.includes('cockroachlabs') || process.env.DATABASE_URL.includes('neon.tech') || process.env.DATABASE_URL.includes('render.com'))
-      ? { rejectUnauthorized: false }
-      : false,
     // Neon/serverless scale-to-zero hardening: drop idle clients before the
     // server closes them, fail fast on connect, and keep TCP connections alive.
     max: 10,
@@ -26,7 +28,14 @@ export function initPostgres() {
     connectionTimeoutMillis: 10000,
     keepAlive: true,
     keepAliveInitialDelayMillis: 10000,
-  });
+  };
+  if (!/[?&]sslmode=/.test(connectionString)) {
+    // No explicit sslmode: local Postgres stays plaintext; known cloud hosts
+    // fail closed with full certificate verification.
+    poolConfig.ssl = cloudDbHost ? { rejectUnauthorized: true } : false;
+  }
+
+  pool = new Pool(poolConfig);
   pool.on('error', (err) => {
     console.error('Unexpected database error:', err);
   });
