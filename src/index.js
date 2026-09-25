@@ -1996,7 +1996,7 @@ app.get('/api/posts/liked/mine', async (req, res) => {
     const users = await getUsers();
     const likes = await getLikes();
     const collects = await getCollects();
-    const tipsList = getTips();
+    const tipsList = await getTips();
     const myLikes = likes.filter(l => l.userId === userId).map(l => l.postId);
     const likedPosts = posts.filter(p => myLikes.includes(p.id)).sort((a, b) => b.createdAt - a.createdAt);
     res.json(likedPosts.map(p => decoratePost(p, userId, users, likes, collects, tipsList)));
@@ -2014,7 +2014,7 @@ app.get('/api/posts/saved/mine', async (req, res) => {
     const users = await getUsers();
     const likes = await getLikes();
     const collects = await getCollects();
-    const tipsList = getTips();
+    const tipsList = await getTips();
     const myCollects = collects.filter(c => c.userId === userId).map(c => c.postId);
     const savedPosts = posts.filter(p => myCollects.includes(p.id)).sort((a, b) => b.createdAt - a.createdAt);
     res.json(savedPosts.map(p => decoratePost(p, userId, users, likes, collects, tipsList)));
