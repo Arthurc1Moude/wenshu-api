@@ -630,7 +630,17 @@ app.put('/api/users/me', async (req, res) => {
     const users = await getUsers();
     const idx = users.findIndex(u => u.id === userId);
     if (idx === -1) return res.status(401).json({ error: '未登录' });
-    const { username, bio, avatar, cover, location } = req.body;
+    const { username, displayName, bio, avatar, cover, location } = req.body;
+    if (displayName !== undefined && displayName !== null) {
+      const trimmedDisplayName = String(displayName).trim();
+      if (!trimmedDisplayName) {
+        return res.status(400).json({ error: '昵称不能为空' });
+      }
+      if (trimmedDisplayName.length > 20) {
+        return res.status(400).json({ error: '昵称不能超过20个字符' });
+      }
+      users[idx].displayName = trimmedDisplayName;
+    }
     if (username !== undefined && username !== null) {
       let finalUsername = username;
       if (users[idx].username.startsWith('admin_')) {
