@@ -460,7 +460,9 @@ export async function initTables() {
       'ban_reason TEXT',
       'display_name TEXT',
       'parent_user_id TEXT',
-      'admin_activated BOOLEAN DEFAULT false'
+      'admin_activated BOOLEAN DEFAULT false',
+      'is_root_admin BOOLEAN DEFAULT false',
+      'admin_warning_count INTEGER DEFAULT 0'
     ];
     for (const col of userAlterColumns) {
       const colName = col.split(' ')[0];
@@ -515,6 +517,8 @@ function rowToUser(row) {
     displayName: row.display_name || null,
     parentUserId: row.parent_user_id || null,
     adminActivated: row.admin_activated || false,
+    isRootAdmin: row.is_root_admin || false,
+    adminWarningCount: Number(row.admin_warning_count || 0),
   };
 }
 
@@ -684,8 +688,8 @@ export async function pgGetUsers() {
 
 export async function pgSaveUser(user) {
   await pool.query(`
-    INSERT INTO users (id, username, password, phone, avatar, cover, bio, location, wenshu_coin, is_vip, vip_level, vip_exp, vip_expires_at, following_count, followers_count, likes_count, register_rank, is_signed_in_today, last_sign_in_date, consecutive_sign_days, created_at, joined_qq_group, is_admin, is_banned, ban_until, ban_reason, display_name, parent_user_id, admin_activated)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29)
+    INSERT INTO users (id, username, password, phone, avatar, cover, bio, location, wenshu_coin, is_vip, vip_level, vip_exp, vip_expires_at, following_count, followers_count, likes_count, register_rank, is_signed_in_today, last_sign_in_date, consecutive_sign_days, created_at, joined_qq_group, is_admin, is_banned, ban_until, ban_reason, display_name, parent_user_id, admin_activated, is_root_admin, admin_warning_count)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)
     ON CONFLICT (id) DO UPDATE SET
       username = EXCLUDED.username, password = EXCLUDED.password, phone = EXCLUDED.phone, avatar = EXCLUDED.avatar, cover = EXCLUDED.cover,
       bio = EXCLUDED.bio, location = EXCLUDED.location, wenshu_coin = EXCLUDED.wenshu_coin, is_vip = EXCLUDED.is_vip,
@@ -695,7 +699,8 @@ export async function pgSaveUser(user) {
       last_sign_in_date = EXCLUDED.last_sign_in_date, consecutive_sign_days = EXCLUDED.consecutive_sign_days,
       joined_qq_group = EXCLUDED.joined_qq_group, is_admin = EXCLUDED.is_admin, is_banned = EXCLUDED.is_banned,
       ban_until = EXCLUDED.ban_until, ban_reason = EXCLUDED.ban_reason,
-      display_name = EXCLUDED.display_name, parent_user_id = EXCLUDED.parent_user_id, admin_activated = EXCLUDED.admin_activated
+      display_name = EXCLUDED.display_name, parent_user_id = EXCLUDED.parent_user_id, admin_activated = EXCLUDED.admin_activated,
+      is_root_admin = EXCLUDED.is_root_admin, admin_warning_count = EXCLUDED.admin_warning_count
   `, [
     user.id, user.username, user.password, user.phone || null, user.avatar || null, user.cover || null, user.bio || '', user.location || '',
     user.wenshuCoin || 0, user.isVip || false, user.vipLevel || 0, user.vipExp || 0, user.vipExpiresAt || null,
@@ -703,7 +708,8 @@ export async function pgSaveUser(user) {
     user.isSignedInToday || false, user.lastSignInDate || '', user.consecutiveSignDays || 0,
     user.createdAt || Date.now(), user.joinedQQGroup || false, user.isAdmin || false, user.isBanned || false,
     user.banUntil || null, user.banReason || null,
-    user.displayName || null, user.parentUserId || null, user.adminActivated || false
+    user.displayName || null, user.parentUserId || null, user.adminActivated || false,
+    user.isRootAdmin || false, Number(user.adminWarningCount) || 0
   ]);
 }
 

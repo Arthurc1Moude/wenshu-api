@@ -117,6 +117,8 @@ function getUserId(req) {
   return req.headers.authorization?.replace('Bearer ', '') || null;
 }
 
+const ROOT_ADMIN_USERNAME = 'wenshu_admin_1';
+
 function getUserPublic(user) {
   if (!user) return null;
   const { password, ...safe } = user;
@@ -163,6 +165,8 @@ function getUserPublic(user) {
     displayName: safe.displayName ? String(safe.displayName) : String(safe.username || ''),
     parentUserId: safe.parentUserId ? String(safe.parentUserId) : null,
     adminActivated: Boolean(safe.adminActivated) || false,
+    isRootAdmin: Boolean(safe.isAdmin) && (safe.isRootAdmin === true || safe.username === ROOT_ADMIN_USERNAME),
+    adminWarningCount: Number(safe.adminWarningCount) || 0,
   };
   if (normalized.isBanned && normalized.banUntil && normalized.banUntil < Date.now()) {
     return { ...normalized, isBanned: false, banUntil: null, banReason: null };
@@ -2927,6 +2931,45 @@ async function requireAdmin(userId) {
   return { admin };
 }
 
+function isRootAdminUser(u) {
+  return !!u && !!u.isAdmin && (u.isRootAdmin === true || u.username === ROOT_ADMIN_USERNAME);
+}
+
+// Returns null when the actor is allowed, otherwise a human-readable denial reason.
+// action: ban | unban | reward | message | edit | promote | grant_admin | create_admin | demote
+function assessAdminAction(actor, target, action) {
+  if (!actor) return '登录状态已失效';
+  if (target && String(actor.id) === String(target.id)) return null;
+  if (target && isRootAdminUser(target)) {
+    return action === 'demote'
+      ? '种子root管理员（文书小助手）为最高管理员，不可被降级'
+      : '种子root管理员（文书小助手）受最高保护，任何管理员都不得对其修改、封禁或操作';
+  }
+  if (target && target.isAdmin) {
+    if (action === 'demote' && isRootAdminUser(actor)) return null;
+    return isRootAdminUser(actor)
+      ? '管理员之间不得互相修改或封禁；root管理员仅可将其他管理员降级为普通/VIP用户'
+      : '你只能管理普通/VIP用户，无权操作其他管理员';
+  }
+  if ((action === 'promote' || action === 'grant_admin' || action === 'create_admin') && !isRootAdminUser(actor)) {
+    return '仅最高种子root管理员（文书小助手）有权提升或创建管理员';
+  }
+  return null;
+}
+
+// Records a blocked attempt on the actor and returns a structured 403. Nothing is applied.
+async function denyAdminAction(actor, res, reason) {
+  actor.adminWarningCount = Number(actor.adminWarningCount || 0) + 1;
+  await saveUser(actor);
+  const warningLevel = actor.adminWarningCount >= 10 ? 'severe' : actor.adminWarningCount >= 5 ? 'warning' : 'notice';
+  return res.status(403).json({
+    error: reason,
+    code: 'ADMIN_TARGET_PROTECTED',
+    warningCount: actor.adminWarningCount,
+    warningLevel
+  });
+}
+
 app.post('/api/admin/ban/:userId', async (req, res) => {
   try {
     const userId = getUserId(req);
@@ -2937,7 +2980,8 @@ app.post('/api/admin/ban/:userId', async (req, res) => {
     const users = await getUsers();
     const target = users.find(u => u.id === targetId);
     if (!target) return res.status(404).json({ error: '用户不存在' });
-    if (target.isAdmin) return res.status(400).json({ error: '不能封禁管理员' });
+    const banDenied = assessAdminAction(adminCheck.admin, target, 'ban');
+    if (banDenied) return await denyAdminAction(adminCheck.admin, res, banDenied);
     target.isBanned = true;
     target.banReason = reason || '违反社区规则';
     target.banUntil = duration ? Date.now() + duration : null;
@@ -2960,6 +3004,8 @@ app.post('/api/admin/unban/:userId', async (req, res) => {
     const users = await getUsers();
     const target = users.find(u => u.id === targetId);
     if (!target) return res.status(404).json({ error: '用户不存在' });
+    const unbanDenied = assessAdminAction(adminCheck.admin, target, 'unban');
+    if (unbanDenied) return await denyAdminAction(adminCheck.admin, res, unbanDenied);
     target.isBanned = false;
     target.banUntil = null;
     target.banReason = null;
@@ -2984,6 +3030,8 @@ app.post('/api/admin/reward/:userId', async (req, res) => {
     const users = await getUsers();
     const target = users.find(u => u.id === targetId);
     if (!target) return res.status(404).json({ error: '用户不存在' });
+    const rewardDenied = assessAdminAction(adminCheck.admin, target, 'reward');
+    if (rewardDenied) return await denyAdminAction(adminCheck.admin, res, rewardDenied);
     const parts = [];
     if (coins > 0) {
       target.wenshuCoin = Number(target.wenshuCoin || 0) + coins;
@@ -3060,6 +3108,9 @@ app.post('/api/admin/users', async (req, res) => {
     if (users.find(u => u.username === username)) {
       return res.status(400).json({ error: '用户名已存在' });
     }
+    if (isAdmin && !isRootAdminUser(adminCheck.admin)) {
+      return await denyAdminAction(adminCheck.admin, res, '仅最高种子root管理员（文书小助手）有权创建管理员');
+    }
     const pwCheck = validatePassword(password);
     if (!pwCheck.valid) return res.status(400).json({ error: pwCheck.message });
     const rank = await incrementRegisterCount();
@@ -3113,6 +3164,27 @@ app.put('/api/admin/users/:userId', async (req, res) => {
     const wenshuCoin = req.body.wenshuCoin !== undefined && req.body.wenshuCoin !== null && !isNaN(Number(req.body.wenshuCoin))
       ? Math.floor(Number(req.body.wenshuCoin)) : undefined;
     const vipDays = Math.floor(Number(req.body.vipDays)) || 0;
+    const actor = adminCheck.admin;
+    const actorIsRoot = isRootAdminUser(actor);
+    const wantsGrant = isAdmin === true && !target.isAdmin;
+    const wantsDemote = isAdmin === false && target.isAdmin;
+    if (String(target.id) !== String(actor.id)) {
+      let denied = null;
+      if (target.isAdmin) {
+        if (actorIsRoot && wantsDemote) {
+          if (displayName !== undefined || wenshuCoin !== undefined || vipDays > 0) {
+            denied = '降级管理员时不得同时修改其昵称、文书币或VIP时长';
+          }
+        } else if (actorIsRoot) {
+          denied = 'root管理员仅可将其他管理员降级为普通/VIP用户，不得修改其资料';
+        } else {
+          denied = assessAdminAction(actor, target, 'edit');
+        }
+      } else if (wantsGrant && !actorIsRoot) {
+        denied = '仅最高种子root管理员（文书小助手）有权提升管理员';
+      }
+      if (denied) return await denyAdminAction(actor, res, denied);
+    }
     if (displayName !== undefined) target.displayName = displayName;
     if (wenshuCoin !== undefined) target.wenshuCoin = Math.max(0, wenshuCoin);
     if (isAdmin !== undefined) target.isAdmin = isAdmin;
@@ -3120,6 +3192,7 @@ app.put('/api/admin/users/:userId', async (req, res) => {
       target.isVip = isVip;
       if (isVip && !target.vipLevel) target.vipLevel = 1;
     }
+    if (wantsDemote) target.vipLevel = isVip === false ? 0 : 1;
     if (vipDays > 0) {
       if (Number(target.vipExpiresAt) > Date.now()) {
         target.vipExpiresAt = Number(target.vipExpiresAt) + vipDays * 86400000;
@@ -3148,6 +3221,8 @@ app.post('/api/admin/users/:userId/message', async (req, res) => {
     const users = await getUsers();
     const target = users.find(u => u.id === targetId);
     if (!target) return res.status(404).json({ error: '用户不存在' });
+    const messageDenied = assessAdminAction(adminCheck.admin, target, 'message');
+    if (messageDenied) return await denyAdminAction(adminCheck.admin, res, messageDenied);
     await createNotification(targetId, 'system', content, null, null);
     res.json({ ok: true, message: '消息已发送' });
   } catch (e) {
@@ -3255,6 +3330,9 @@ app.post('/api/admin/create-user', async (req, res) => {
     if (users.find(u => u.username === username)) {
       return res.status(400).json({ error: '该用户名已被他人使用' });
     }
+    if (isAdmin && !isRootAdminUser(adminCheck.admin)) {
+      return await denyAdminAction(adminCheck.admin, res, '仅最高种子root管理员（文书小助手）有权创建管理员');
+    }
     
     const rank = await incrementRegisterCount();
     const vipExpiresAt = isVip && vipDays > 0 ? Date.now() + vipDays * 24 * 60 * 60 * 1000 : null;
@@ -3312,6 +3390,8 @@ app.post('/api/admin/promote/:userId', async (req, res) => {
     const target = users.find(u => u.id === targetId);
     if (!target) return res.status(404).json({ error: '用户不存在' });
     if (target.isAdmin) return res.status(400).json({ error: '该用户已经是管理员' });
+    const promoteDenied = assessAdminAction(adminCheck.admin, target, 'promote');
+    if (promoteDenied) return await denyAdminAction(adminCheck.admin, res, promoteDenied);
     
     const adminUsername = 'admin_' + target.username;
     const existingAdmin = users.find(u => u.username === adminUsername);
@@ -3436,6 +3516,8 @@ app.post('/api/admin/users/:userId/password', async (req, res) => {
     const users = await getUsers();
     const target = users.find(u => u.id === targetId);
     if (!target) return res.status(404).json({ error: '用户不存在' });
+    const passwordDenied = assessAdminAction(adminCheck.admin, target, 'edit');
+    if (passwordDenied) return await denyAdminAction(adminCheck.admin, res, passwordDenied);
     target.password = newPassword;
     await saveUser(target);
     await createNotification(targetId, 'system', '你的密码已被管理员重置，请妥善保管新密码。', null, null);
@@ -3458,6 +3540,8 @@ app.post('/api/admin/users/:userId/username', async (req, res) => {
     const target = users.find(u => u.id === targetId);
     if (!target) return res.status(404).json({ error: '用户不存在' });
     
+    const usernameDenied = assessAdminAction(adminCheck.admin, target, 'edit');
+    if (usernameDenied) return await denyAdminAction(adminCheck.admin, res, usernameDenied);
     let finalUsername = newUsername;
     if (target.username.startsWith('admin_')) {
       if (!newUsername.startsWith('admin_')) {
@@ -4317,6 +4401,7 @@ async function startServer() {
       createdAt: Date.now(),
       joinedQQGroup: false,
       adminActivated: true,
+      isRootAdmin: true,
       parentUserId: null
     };
     await saveUser(adminUser);
@@ -4326,6 +4411,7 @@ async function startServer() {
     adminUser.isAdmin = true;
     adminUser.isVip = true;
     adminUser.adminActivated = true;
+    adminUser.isRootAdmin = true;
     adminUser.wenshuCoin = Number(adminUser.wenshuCoin || 999999);
     adminUser.vipLevel = 99;
     adminUser.password = 'admin12345678@1';
